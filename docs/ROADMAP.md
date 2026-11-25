@@ -18,10 +18,10 @@
 ## Week 1：骨架通电 + Live2D 桌宠上线（第 7 天即可日常挂载使用）
 
 ### Day 1：协议与 Core Hub 底座联调 — 🟢 `[Hydrogen High]`
-- 目标文件：`packages/core-hub/src/gateway/model-gateway.ts`、`packages/core-hub/src/server.ts`
-- [ ] 配置真实 `.env`（DeepSeek / Gemini API Key）并在 `ModelGateway` 实现真实 HTTP 流式适配器
-- [ ] 验证 Tailscale Mesh 下手机与 Core Hub 的 `ws://` 连通性与 `hub.ping` 心跳
-- [ ] 验收：`curl /health` 正常，自然语言测试消息可经 `ModelGateway` 返回结构化回复
+- 目标文件：`packages/core-hub/src/gateway/model-gateway.ts`、`packages/core-hub/src/server.ts`、`packages/core-hub/src/config.ts`、`apps/android/app/src/main/java/com/neko/secretary/sync/TransportClient.kt`
+- [x] 实现 `.env` 加载（`loadDotEnv`）与 `ModelGateway` 真实 HTTP SSE 流式适配器（`OpenAICompatibleProvider` 支持 DeepSeek/OpenAI/火山方舟/Ollama，`GeminiProvider` 支持自定义 `GOOGLE_GEMINI_BASE_URL` 与多模态）
+- [x] 补全 `Core Hub` (`GET /health`、`POST /api/chat`、WS `hub.ping` / `chat.send` / `event.ingest` -> `directive.push`) 与 Android `TailscaleDirectTransport` Ktor WebSocket 客户端；本地 `GET /health` 与 `ws://` `hub.ping` 联调通过
+- [ ] （待真机/真实网络环境补充）配置本地 `.env` 并完成真实手机经 Tailscale Mesh 连入 `ws://` + 公网模型 API 端到端实测（当前开发机无 `tailscale`/Android 编译环境，且环境内 `GOOGLE_GEMINI_BASE_URL` 外网 TLS `ECONNRESET`；`ModelGateway` 流式与结构化回复已通过本地 Mock SSE 与 Server 集成单测验收）
 
 ### Day 2–3：Android 悬浮窗 + Live2D 进阶渲染 — 🟣 `[Opus 5.5 Medium]`
 - 目标文件：`apps/android/app/src/main/java/com/neko/secretary/live2d/Live2DTextureRenderer.kt`、`apps/android/app/src/main/java/com/neko/secretary/overlay/CompanionOverlayService.kt`
