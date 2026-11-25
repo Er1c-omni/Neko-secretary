@@ -72,3 +72,32 @@ Quick runtime health check for Core Hub:
 ```
 
 Before starting a new task from [`docs/ROADMAP.md`](./docs/ROADMAP.md), inspect the current file implementations first and update checklist items in `docs/ROADMAP.md` as milestones complete.
+
+---
+
+## 5. Model Selection Guide (`Hydrogen High` vs `Opus 5.5 Medium`)
+
+To optimize token efficiency without compromising quality on hard subsystems, follow this split (also tagged per milestone in [`docs/ROADMAP.md`](./docs/ROADMAP.md)):
+
+- **Default Workhorse — `Hydrogen High` (~75% of tasks)**:
+  - Use for routine TypeScript/Go/Kotlin feature wiring, `ModelGateway` HTTP providers, Compose UI screens, `ShareIntakeHandler` multimodal parsing, notification filters, deadline/weekly-report plugins, SQLite queries, and standard unit tests.
+- **Escalation Model — `Opus 5.5 Medium` (~25% of tasks)**:
+  - Switch to `Opus 5.5 Medium` when implementing or debugging these 4 high-complexity areas:
+    1. **Live2D OpenGL ES / EGL Transparent Overlay & Adaptive FPS** (`Week 1 Day 2–3`):
+       - `apps/android/app/src/main/java/com/neko/secretary/live2d/Live2DTextureRenderer.kt`
+       - `apps/android/app/src/main/java/com/neko/secretary/overlay/CompanionOverlayService.kt`
+       - *Why*: Dedicated GL thread lifecycle, `TextureView` alpha blending over third-party apps, transparent pixel hit-testing/click-through, and 60/20/10/0 FPS throttling.
+    2. **Real-Time Streaming Audio ASR & TTS Lip-Sync Concurrency** (`Week 1 Day 4`, `Week 2 Day 9`):
+       - `apps/android/app/src/main/java/com/neko/secretary/voice/VoicePipeline.kt`
+       - *Why*: Low-latency audio capture buffering, streaming WebSocket framing, offline Sherpa-ONNX fallback, and RMS audio envelope driving Live2D mouth parameters.
+    3. **Hybrid Scheduler Edge Cases & Offline Idempotent Sync** (`Week 1 Day 6–7`, `Week 2 Day 14`):
+       - `packages/core-hub/src/scheduler/scheduler.ts`, `packages/core-hub/src/proactive/engine.ts`
+       - `apps/android/app/src/main/java/com/neko/secretary/sync/TransportClient.kt`
+       - *Why*: `fire_key` deduplication, timezone/quiet-hours/reboot catch-up windows, Room offline queue replay, and `AlarmManager` fallback coordination.
+    4. **Multi-PC Multi-Agent Orchestrator, Native OS Activity Hooks & L2 SafetyGate** (`Week 3 Day 15–18`):
+       - `packages/pc-worker/internal/adapter/adapter.go`, `packages/pc-worker/internal/activity/activity.go`
+       - `packages/core-hub/src/orchestrator/registry.ts`, `packages/core-hub/src/server.ts`
+       - `apps/android/app/src/main/java/com/neko/secretary/actions/SafetyGateClient.kt`
+       - *Why*: Windows/Linux native idle-input hooks, PTY/JSON-stream wrapping for `t3code`/`dsh`/`codex`/`claude-code`, parent-child `agent_threads` lineage, and suspending/resuming L2 `SafetyGate` Diff approvals across devices.
+- **Rule of Thumb**: Start every day with `Hydrogen High`; switch to `Opus 5.5 Medium` on any `🟣 [Opus 5.5 Medium]` block in `docs/ROADMAP.md` or whenever a bug persists after 2 retries.
+
