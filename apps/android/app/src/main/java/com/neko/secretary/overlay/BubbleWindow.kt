@@ -9,30 +9,39 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.neko.secretary.protocol.DirectiveAction
 import kotlin.math.roundToInt
 
 /**
  * Speech bubble in its own small overlay window, so the companion window stays tight around the
- * character (less transparent area to intercept touches). Tap the bubble to dismiss.
+ * character (less transparent area to intercept touches). Supports optional quick-reply action
+ * chips (e.g. `[喝完啦]` / `[5m后]`). Tap the text to dismiss.
  */
 internal class BubbleWindow(
     private val context: Context,
     private val windowManager: WindowManager,
-    private val onDismissed: () -> Unit
+    private val onDismissed: () -> Unit,
+    private val onActionClicked: (DirectiveAction) -> Unit = {}
 ) {
     private val density = context.resources.displayMetrics.density
     private var container: LinearLayout? = null
     private var textView: TextView? = null
+    private var actionsRow: LinearLayout? = null
     private var params: WindowManager.LayoutParams? = null
     private var minimal = false
 
     val isShowing: Boolean get() = container?.isAttachedToWindow == true
 
-    fun show(text: String, minimalStyle: Boolean) {
+    fun show(
+        text: String,
+        minimalStyle: Boolean,
+        actions: List<DirectiveAction> = emptyList()
+    ) {
         val view = container ?: build().also { container = it }
         minimal = minimalStyle
         styleFor(view, minimalStyle)
         textView?.text = text
+        renderActions(if (minimalStyle) emptyList() else actions)
         if (!view.isAttachedToWindow) {
             val lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -79,15 +88,56 @@ internal class BubbleWindow(
         val text = TextView(context).apply {
             textSize = 14f
             setLineSpacing(0f, 1.15f)
-        }
-        textView = text
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(text)
             setOnClickListener {
                 hide()
                 onDismissed()
             }
+        }
+        textView = text
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+            setPadding(0, dp(6), 0, 0)
+        }
+        actionsRow = row
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(text)
+            addView(row)
+        }
+    }
+
+    private fun renderActions(actions: List<DirectiveAction>) {
+        val row = actionsRow ?: return
+        row.removeAllViews()
+        if (actions.isEmpty()) {
+            row.visibility = View.GONE
+            return
+        }
+        row.visibility = View.VISIBLE
+        actions.forEachIndexed { idx, action ->
+            val chip = TextView(context).apply {
+                text = action.label
+                textSize = 12f
+                setTextColor(Color.rgb(88, 36, 56))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(12).toFloat()
+                    setColor(Color.argb(235, 255, 224, 232))
+                    setStroke(dp(1), Color.argb(140, 235, 120, 150))
+                }
+                setPadding(dp(10), dp(4), dp(10), dp(4))
+                setOnClickListener {
+                    hide()
+                    onActionClicked(action)
+                }
+            }
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (idx > 0) marginStart = dp(6)
+            }
+            row.addView(chip, lp)
         }
     }
 

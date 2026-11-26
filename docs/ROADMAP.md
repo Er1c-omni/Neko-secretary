@@ -46,12 +46,12 @@
 - [ ] （待真机/Vision API Key 补充）在真机微信/邮件截完图分享给助理，联调公网 Vision 模型 3 秒内端到端入库
 
 ### Day 6–7：第一条完整主动提醒闭环 — 🟣 `[Opus 5.5 Medium]`
-- 目标文件：`packages/core-hub/src/scheduler/scheduler.ts`、`apps/android/app/src/main/java/com/neko/secretary/sync/TransportClient.kt`
-- 切换原因：需保证 `fire_key` 防重落库、断线重连后 Room 离线队列幂等补发，以及服务端在线调度与手机本地 `AlarmManager` 兜底不冲突、不连弹。
-- [ ] 完善 `HybridScheduler` 持久化时间/间隔调度与 `fire_key` 防重落库
-- [ ] 打通 Core Hub → WebSocket `directive.push` → Android 桌宠抱水杯气泡 `[喝完啦]` / `[5m后]` 反馈回传
-- [ ] 在 Android 端接入 `AlarmManager` 作为断网离线基础兜底闹钟
-- [ ] 验收：语音说“每小时提醒我喝水”，到点桌宠主动弹出，点击反馈写入 `proactive_feedback` 与 `world_state`
+- 目标文件：`packages/core-hub/src/scheduler/scheduler.ts`、`packages/core-hub/src/server.ts`、`apps/android/app/src/main/java/com/neko/secretary/sync/TransportClient.kt`、`apps/android/app/src/main/java/com/neko/secretary/sync/OfflineReminderScheduler.kt`
+- 切换原因：需保证 `fire_key` 防重落库、断线重连后持久化离线队列幂等补发，以及服务端在线调度与手机本地 `AlarmManager` 兜底不冲突、不连弹。
+- [x] 完善 `HybridScheduler` 持久化时间（`time`）/间隔（`interval`）调度、`fire_key` 防重落库、跨午夜静默时段与单日上限保护、重启漏触发 TTL 窗口保护、5 分钟贪睡重排（`snoozeJob`）与零 Token 快速口令解析（`parseQuickReminderCommand`）
+- [x] 打通 Core Hub → WebSocket `directive.push` → Android 桌宠抱水杯气泡 `[喝完啦]` / `[5m后]` 交互芯片（`BubbleWindow`）→ `user.action_reply` 反馈回传（持久化离线队列 `PersistentEventQueue` 断网自动补发）
+- [x] 在 Android 端接入 `AlarmManager`（`OfflineReminderScheduler` + `OfflineReminderReceiver` 支持 `BOOT_COMPLETED` 重启自恢复），通过 `EventSyncCoordinator.isConnected` + `FireKeyDeduplicator` 保证在线调度与离线闹钟不冲突、不连弹
+- [x] 验收：端到端单测覆盖「语音说“每小时提醒我喝水” → 落库 `scheduled_jobs` → 到点推送 `LIFE_WATER` 含 `[喝完啦]`/`[5m后]` → 点击反馈写入 `proactive_feedback` 与 `world_state`」，`pnpm typecheck && pnpm test`（16/16）与 `:app:testDebugUnitTest`（42/42）全部通过
 
 ---
 

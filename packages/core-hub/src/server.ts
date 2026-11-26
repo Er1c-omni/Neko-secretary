@@ -23,11 +23,15 @@ import {
 } from "./gateway/model-gateway.ts";
 import { MemoryRepository } from "./memory/repository.ts";
 import { OrchestratorRegistry } from "./orchestrator/registry.ts";
-import { PersonaRenderer } from "./persona/renderer.ts";
+import { PersonaRenderer, type PersonaIntent } from "./persona/renderer.ts";
 import { ShareIntakePlugin, type ShareCardKind } from "./plugins/share-intake.ts";
 import { SafetyGate, wrapUntrustedExternalData } from "./policy/safety-gate.ts";
 import { ProactiveEngine } from "./proactive/engine.ts";
-import { HybridScheduler } from "./scheduler/scheduler.ts";
+import {
+  HybridScheduler,
+  parseQuickReminderCommand,
+  type DueJobFire,
+} from "./scheduler/scheduler.ts";
 import { HubDatabase } from "./storage/database.ts";
 
 export interface HubRuntime {
@@ -41,6 +45,7 @@ export interface HubRuntime {
   orchestrator: OrchestratorRegistry;
   modelGateway: ModelGateway;
   shareIntake: ShareIntakePlugin;
+  pollSchedulerNow(now?: number): DueJobFire[];
   start(): Promise<{ host: string; port: number }>;
   stop(): Promise<void>;
 }
@@ -62,8 +67,10 @@ interface TurnResult {
 interface ServerDeps {
   eventBus: EventBus;
   memory: MemoryRepository;
+  proactive: ProactiveEngine;
   persona: PersonaRenderer;
   safetyGate: SafetyGate;
+  scheduler: HybridScheduler;
   orchestrator: OrchestratorRegistry;
   modelGateway: ModelGateway;
   shareIntake: ShareIntakePlugin;
@@ -121,12 +128,74 @@ export function createHubRuntime(
   const deps: ServerDeps = {
     eventBus,
     memory,
+    proactive,
     persona,
     safetyGate,
+    scheduler,
     orchestrator,
     modelGateway,
     shareIntake,
     broadcastNotification,
+  };
+
+  const dispatchScheduledFire = (fire: DueJobFire): void => {
+    const mode =
+      memory.getWorldState<AssistantMode>("assistant_mode")?.value ??
+      memory.getWorldState<AssistantMode>("current_mode")?.value ??
+      "life";
+    const stealthOffice = memory.getWorldState<boolean>("stealth_office")?.value ?? false;
+    const isCritical = fire.job.action.intent === "deadline_alert";
+    const outcome = proactive.evaluateDecision({
+      urgency: isCritical ? 96 : 65,
+      relevance: 80,
+      value: 75,
+      interruption: stealthOffice ? 50 : 25,
+      fatigue: 15,
+      inQuietHours: false,
+      isDriving: false,
+      stealthOffice,
+    });
+    if (!outcome.allow) {
+      return;
+    }
+
+    const intent = (
+      ["water_reminder", "sedentary_alert", "deadline_alert", "worker_approval", "morning_greeting"].includes(
+        fire.job.action.intent,
+      )
+        ? fire.job.action.intent
+        : "generic_reply"
+    ) as PersonaIntent;
+
+    const baseDirective = persona.render({
+      intent,
+      mode,
+      stealthOffice: outcome.stealthOverride,
+      ttsAllowed: !outcome.stealthOverride,
+      summaryText: fire.job.name,
+    });
+
+    // Use deterministic fireKey as directiveId so Android deduplicates online WS vs offline AlarmManager
+    const directive: CharacterDirective = {
+      ...baseDirective,
+      directiveId: fire.fireKey,
+      actions:
+        intent === "water_reminder"
+          ? [
+              { id: `water_done:${fire.job.id}`, label: "喝完啦", feedbackMotion: "happy_ear_wiggle" },
+              { id: `water_snooze_5:${fire.job.id}`, label: "5m后", feedbackMotion: "puff_cheeks" },
+            ]
+          : baseDirective.actions,
+    };
+
+    memory.upsertWorldState("last_scheduled_fire", {
+      jobId: fire.job.id,
+      fireKey: fire.fireKey,
+      intent,
+      score: outcome.score,
+      firedAt: fire.firedAt,
+    });
+    broadcastNotification("directive.push", directive);
   };
 
   const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -180,10 +249,18 @@ export function createHubRuntime(
     orchestrator,
     modelGateway,
     shareIntake,
+    pollSchedulerNow: (now: number = Date.now()) => {
+      const fires = scheduler.pollDueJobs(now);
+      for (const fire of fires) {
+        dispatchScheduledFire(fire);
+      }
+      return fires;
+    },
     start: () =>
       new Promise((resolve, reject) => {
         httpServer.once("error", reject);
         httpServer.listen(config.port, config.host, () => {
+          scheduler.start(15_000, dispatchScheduledFire);
           const addr = httpServer.address();
           const boundPort = typeof addr === "object" && addr ? addr.port : config.port;
           resolve({ host: config.host, port: boundPort });
@@ -286,6 +363,17 @@ async function handleHttpRequest(
         }),
       );
     }
+    return;
+  }
+
+  if (req.method === "GET" && urlPath === "/api/scheduler/jobs") {
+    if (config.hubToken && req.headers.authorization !== `Bearer ${config.hubToken}`) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, jobs: deps.scheduler.listJobs() }));
     return;
   }
 
@@ -626,6 +714,54 @@ async function handleRpc(
               (envelope.payload as { stealthOffice?: boolean }).stealthOffice,
             );
             deps.memory.upsertWorldState("stealth_office", stealthOffice);
+          } else if (envelope.type === "user.action_reply") {
+            const payload = envelope.payload as {
+              actionId?: string;
+              jobId?: string | null;
+              intent?: string;
+              directiveId?: string;
+              latencySec?: number | null;
+            };
+            const rawAction = typeof payload.actionId === "string" ? payload.actionId : "unknown";
+            const [actionBase, embeddedJobId] = rawAction.split(":");
+            const jobId = payload.jobId ?? embeddedJobId ?? null;
+            const lastFire = deps.memory.getWorldState<{
+              jobId?: string;
+              intent?: string;
+              score?: number;
+            }>("last_scheduled_fire")?.value;
+
+            const intent = payload.intent ?? lastFire?.intent ?? (actionBase.startsWith("water_") ? "water_reminder" : "generic_reply");
+            const decisionScore = lastFire?.score ?? 50;
+            const now = Date.now();
+
+            deps.scheduler.recordFeedback({
+              jobId: jobId ?? lastFire?.jobId ?? null,
+              intent,
+              decisionScore,
+              userAction: actionBase,
+              contextSnapshot: {
+                directiveId: payload.directiveId ?? null,
+                rawAction,
+              },
+              latencySec: payload.latencySec ?? null,
+              now,
+            });
+
+            deps.memory.upsertWorldState("last_proactive_action", {
+              action: actionBase,
+              jobId,
+              intent,
+              ts: now,
+            });
+
+            if (actionBase === "water_done") {
+              deps.memory.upsertWorldState("last_water_at", now);
+            } else if (actionBase === "water_snooze_5") {
+              const targetJobId = jobId ?? lastFire?.jobId ?? "job_water_hourly";
+              const snoozedUntil = deps.scheduler.snoozeJob(targetJobId, 5, now);
+              deps.memory.upsertWorldState("water_snooze_until", snoozedUntil ?? now + 5 * 60_000);
+            }
           } else if (
             ingest.route === "wake_agent" &&
             (envelope.type === "user.text_message" ||
@@ -639,21 +775,47 @@ async function handleRpc(
             };
             const text = typeof payload.text === "string" ? payload.text.trim() : "";
             if (text.length > 0) {
-              void runNaturalLanguageTurn(
-                {
-                  text,
-                  mode: payload.mode,
-                  stealthOffice: payload.stealthOffice,
-                  ttsAllowed: payload.ttsAllowed,
-                },
-                deps,
-              )
-                .then((turn) => {
-                  sendWsNotification(ws, "directive.push", turn.directive);
-                })
-                .catch((err) => {
-                  console.error("[neko-core-hub] async turn failed:", err);
+              const quickReminder = parseQuickReminderCommand(text);
+              if (quickReminder) {
+                // Zero-LLM fast-path: persist recurring reminder immediately and confirm
+                deps.scheduler.upsertJob(quickReminder.spec, quickReminder.nextRunAt);
+                deps.memory.upsertWorldState("active_reminder_job", {
+                  jobId: quickReminder.spec.id,
+                  nextRunAt: quickReminder.nextRunAt,
                 });
+                const mode =
+                  payload.mode ??
+                  deps.memory.getWorldState<AssistantMode>("assistant_mode")?.value ??
+                  "life";
+                const stealthOffice =
+                  payload.stealthOffice ??
+                  deps.memory.getWorldState<boolean>("stealth_office")?.value ??
+                  false;
+                const confirmDirective = deps.persona.render({
+                  intent: "generic_reply",
+                  mode,
+                  stealthOffice,
+                  ttsAllowed: payload.ttsAllowed ?? false,
+                  summaryText: quickReminder.confirmReply,
+                });
+                sendWsNotification(ws, "directive.push", confirmDirective);
+              } else {
+                void runNaturalLanguageTurn(
+                  {
+                    text,
+                    mode: payload.mode,
+                    stealthOffice: payload.stealthOffice,
+                    ttsAllowed: payload.ttsAllowed,
+                  },
+                  deps,
+                )
+                  .then((turn) => {
+                    sendWsNotification(ws, "directive.push", turn.directive);
+                  })
+                  .catch((err) => {
+                    console.error("[neko-core-hub] async turn failed:", err);
+                  });
+              }
             }
           }
         }
@@ -708,6 +870,32 @@ async function handleRpc(
           jsonrpc: "2.0",
           id: req.id,
           result: turn,
+        };
+      }
+      case "scheduler.list": {
+        return {
+          jsonrpc: "2.0",
+          id: req.id,
+          result: { jobs: deps.scheduler.listJobs() },
+        };
+      }
+      case "scheduler.snooze": {
+        const params = (req.params ?? {}) as { jobId?: string; delayMinutes?: number };
+        if (typeof params.jobId !== "string" || params.jobId.trim().length === 0) {
+          return {
+            jsonrpc: "2.0",
+            id: req.id,
+            error: { code: -32602, message: "Missing jobId" },
+          };
+        }
+        const snoozedUntil = deps.scheduler.snoozeJob(
+          params.jobId.trim(),
+          typeof params.delayMinutes === "number" ? params.delayMinutes : 5,
+        );
+        return {
+          jsonrpc: "2.0",
+          id: req.id,
+          result: { ok: snoozedUntil !== null, snoozedUntil },
         };
       }
       case "worker.register": {

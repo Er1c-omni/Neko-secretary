@@ -25,6 +25,12 @@ enum class CharacterStateId {
     STEALTH_OFFICE
 }
 
+data class DirectiveAction(
+    val id: String,
+    val label: String,
+    val feedbackMotion: String? = null
+)
+
 data class CharacterDirective(
     val directiveId: String,
     val mode: AssistantMode,
@@ -35,5 +41,6 @@ data class CharacterDirective(
     val motion: String,
     val costume: String,
     val ttsAllowed: Boolean,
-    val ttsCacheKey: String?
+    val ttsCacheKey: String?,
+    val actions: List<DirectiveAction> = emptyList()
 )

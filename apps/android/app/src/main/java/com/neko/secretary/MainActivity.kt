@@ -49,6 +49,9 @@ import com.neko.secretary.perception.ShareIntakeHandler
 import com.neko.secretary.protocol.AssistantMode
 import com.neko.secretary.protocol.CharacterDirective
 import com.neko.secretary.protocol.CharacterStateId
+import com.neko.secretary.protocol.DirectiveAction
+import com.neko.secretary.sync.EventSyncCoordinator
+import com.neko.secretary.sync.OfflineReminderScheduler
 import com.neko.secretary.voice.AsrConfig
 import com.neko.secretary.voice.AsrConfigStore
 import com.neko.secretary.voice.AsrProviderKind
@@ -101,7 +104,15 @@ class MainActivity : ComponentActivity() {
                         },
                         onSaveHubConfig = { cfg ->
                             HubEndpointStore.save(this, cfg)
-                            Toast.makeText(this, "已保存 Core Hub 地址", Toast.LENGTH_SHORT).show()
+                            if (cfg.baseUrl.isNotBlank()) {
+                                val wsUrl = cfg.baseUrl
+                                    .replaceFirst("https://", "wss://")
+                                    .replaceFirst("http://", "ws://")
+                                    .trimEnd('/') + "/ws"
+                                EventSyncCoordinator.connect(this, wsUrl, cfg.bearerToken.ifBlank { null })
+                            }
+                            OfflineReminderScheduler.scheduleWaterFallback(this, 60)
+                            Toast.makeText(this, "已保存 Core Hub 地址并开启离线兜底闹钟", Toast.LENGTH_SHORT).show()
                         },
                         onConfirmShareCard = { ShareIntakeHandler.confirmPending(this) },
                         onDismissShareCard = { ShareIntakeHandler.dismissPending(this) }
@@ -150,7 +161,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private fun demoDirective(state: CharacterStateId, text: String, mode: AssistantMode): CharacterDirective =
+private fun demoDirective(
+    state: CharacterStateId,
+    text: String,
+    mode: AssistantMode,
+    actions: List<DirectiveAction> = emptyList()
+): CharacterDirective =
     CharacterDirective(
         directiveId = UUID.randomUUID().toString(),
         mode = mode,
@@ -161,7 +177,8 @@ private fun demoDirective(state: CharacterStateId, text: String, mode: Assistant
         motion = "",
         costume = if (mode == AssistantMode.SECRETARY) "secretary" else "default",
         ttsAllowed = false,
-        ttsCacheKey = null
+        ttsCacheKey = null,
+        actions = actions
     )
 
 @Composable
@@ -285,7 +302,15 @@ fun NekoHomeConsole(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = {
                 CharacterStateMachine.applyDirective(
-                    demoDirective(CharacterStateId.LIFE_WATER, "主人，该喝水啦~ 抱着水杯等你哦", mode)
+                    demoDirective(
+                        CharacterStateId.LIFE_WATER,
+                        "主人，该喝水啦~ 抱着水杯等你哦",
+                        mode,
+                        actions = listOf(
+                            DirectiveAction("water_done:job_water_hourly", "喝完啦", "happy_ear_wiggle"),
+                            DirectiveAction("water_snooze_5:job_water_hourly", "5m后", "puff_cheeks")
+                        )
+                    )
                 )
             }) { Text("Water") }
             OutlinedButton(onClick = {

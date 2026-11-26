@@ -75,5 +75,14 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+        <receiver
+            android:name=".sync.OfflineReminderReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.neko.secretary.sync.ACTION_WATER_ALARM" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

@@ -53,6 +53,9 @@ import com.neko.secretary.live2d.RenderConditions
 import com.neko.secretary.protocol.AssistantMode
 import com.neko.secretary.protocol.CharacterDirective
 import com.neko.secretary.protocol.CharacterStateId
+import com.neko.secretary.protocol.DirectiveAction
+import com.neko.secretary.sync.EventSyncCoordinator
+import com.neko.secretary.sync.OfflineReminderScheduler
 import com.neko.secretary.voice.StreamingVoicePipeline
 import com.neko.secretary.voice.VoiceEventFactory
 import com.neko.secretary.voice.VoiceGestureMachine
@@ -172,8 +175,19 @@ class CompanionOverlayService : Service() {
         touchSlop = ViewConfiguration.get(this).scaledTouchSlop
 
         StealthController.restore(this)
+        EventSyncCoordinator.ensureInitialized(this)
+        if (OverlayRuntime.onVoiceTranscriptEvent == null) {
+            OverlayRuntime.onVoiceTranscriptEvent = { eventJson ->
+                EventSyncCoordinator.sendEventAsync(this, eventJson)
+            }
+        }
         renderer = Live2DTextureRenderer(this) { Live2DModelRepository.resolveActiveModel(this) }
-        bubble = BubbleWindow(this, windowManager) { onBubbleDismissed() }
+        bubble = BubbleWindow(
+            context = this,
+            windowManager = windowManager,
+            onDismissed = { onBubbleDismissed() },
+            onActionClicked = { action -> onBubbleActionClicked(action) }
+        )
         voicePipeline = StreamingVoicePipeline.create(this)
         voiceGesture = VoiceGestureMachine(cancelThresholdPx = dp(VOICE_CANCEL_DRAG_DP).toFloat())
         side = OverlayPrefs.side(this)
@@ -598,10 +612,36 @@ class CompanionOverlayService : Service() {
         CharacterStateMachine.lastDirective.value?.text?.takeIf { it.isNotBlank() }
             ?: if (CharacterStateMachine.mode.value == AssistantMode.SECRETARY) "指挥官，待命中。" else "喵~ 我在边上陪着你哦"
 
-    private fun showBubble(text: String, minimal: Boolean = stealthLayout) {
+    private fun showBubble(
+        text: String,
+        minimal: Boolean = stealthLayout,
+        actions: List<DirectiveAction> = emptyList()
+    ) {
         if (!screenInteractive) return
-        bubble.show(text, minimal)
+        bubble.show(text, minimal, actions)
         repositionBubble()
+    }
+
+    private fun onBubbleActionClicked(action: DirectiveAction) {
+        val directive = CharacterStateMachine.lastDirective.value
+        if (directive != null) {
+            EventSyncCoordinator.sendActionReply(this, directive, action)
+        }
+        val baseAction = action.id.substringBefore(":")
+        when (baseAction) {
+            "water_done" -> {
+                renderer.onTap(0.5f, 0.5f)
+                showBubble("好耶~ 补水成功！继续加油哦")
+            }
+            "water_snooze_5" -> {
+                OfflineReminderScheduler.scheduleWaterFallback(this, 5)
+                showBubble("好哒，5 分钟后再提醒你喝水~")
+            }
+            else -> showBubble("已收到：${action.label}")
+        }
+        mainHandler.removeCallbacks(settleRunnable)
+        CharacterStateMachine.settle()
+        scheduleAutoRetract()
     }
 
     private fun repositionBubble() {
@@ -689,7 +729,7 @@ class CompanionOverlayService : Service() {
         boost(DIRECTIVE_BOOST_MS)
         if (directive.state != CharacterStateId.PEEK_IDLE && directive.state != CharacterStateId.DOCK_STANDBY) {
             expandFromEdge()
-            if (directive.text.isNotBlank()) showBubble(directive.text, minimal = false)
+            if (directive.text.isNotBlank()) showBubble(directive.text, minimal = false, actions = directive.actions)
             mainHandler.removeCallbacks(settleRunnable)
             mainHandler.postDelayed(settleRunnable, DIRECTIVE_SETTLE_MS)
             scheduleAutoRetract()
