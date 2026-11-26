@@ -80,6 +80,10 @@ class CubismModelBackend(
         model?.triggerTapMotion()
     }
 
+    override fun setMouthOpen(level: Float) {
+        model?.setMouthOpen(level.coerceIn(0f, 1f))
+    }
+
     override fun release() {
         model?.releaseResources()
         model = null
@@ -115,6 +119,11 @@ private class NekoCubismModel(
     private var modelSetting: ICubismModelSetting? = null
     private var eyeBlink: CubismEyeBlink? = null
     private var breath: CubismBreath? = null
+    @Volatile private var mouthOpenValue = 0f
+
+    fun setMouthOpen(value: Float) {
+        mouthOpenValue = value
+    }
 
     val isNonIdleMotionRunning: Boolean
         get() = !motionManager.isFinished && currentMotionPriority >= PRIORITY_NORMAL
@@ -225,6 +234,10 @@ private class NekoCubismModel(
         }
         expressionManager.updateMotion(model, deltaSeconds)
         breath?.updateParameters(model, deltaSeconds)
+        if (mouthOpenValue > 0.001f) {
+            val mouthId = CubismFramework.getIdManager().getId(CubismDefaultParameterId.ParameterId.MOUTH_OPEN_Y.id)
+            model.addParameterValue(mouthId, mouthOpenValue, 0.8f)
+        }
         physics?.evaluate(model, deltaSeconds)
         pose?.updateParameters(model, deltaSeconds)
         model.update()

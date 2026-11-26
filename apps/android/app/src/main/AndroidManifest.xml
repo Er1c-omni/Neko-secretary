@@ -17,7 +17,8 @@
     <application
         android:allowBackup="false"
         android:label="Neko Secretary"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"

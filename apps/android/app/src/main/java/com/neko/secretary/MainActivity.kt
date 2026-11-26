@@ -8,8 +8,11 @@ import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,15 +44,18 @@ import androidx.compose.ui.unit.dp
 import com.neko.secretary.live2d.CharacterStateMachine
 import com.neko.secretary.live2d.Live2DModelRepository
 import com.neko.secretary.overlay.CompanionOverlayService
+import com.neko.secretary.overlay.DailyScriptTracker
 import com.neko.secretary.overlay.OverlayRuntime
 import com.neko.secretary.overlay.StealthController
 import com.neko.secretary.perception.HubEndpointConfig
 import com.neko.secretary.perception.HubEndpointStore
 import com.neko.secretary.perception.ShareIntakeHandler
+import com.neko.secretary.perception.WifiStealthConfigStore
 import com.neko.secretary.protocol.AssistantMode
 import com.neko.secretary.protocol.CharacterDirective
 import com.neko.secretary.protocol.CharacterStateId
 import com.neko.secretary.protocol.DirectiveAction
+import com.neko.secretary.protocol.TodayScript
 import com.neko.secretary.sync.EventSyncCoordinator
 import com.neko.secretary.sync.OfflineReminderScheduler
 import com.neko.secretary.voice.AsrConfig
@@ -79,23 +85,33 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         handleIncomingIntent(intent)
         StealthController.restore(this)
+        DailyScriptTracker.restore(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
         val initialAsrConfig = AsrConfigStore.load(this)
         val initialHubConfig = HubEndpointStore.load(this)
+        val initialWorkWifiCsv = WifiStealthConfigStore.loadRawCsv(this)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     NekoHomeConsole(
                         initialAsrConfig = initialAsrConfig,
                         initialHubConfig = initialHubConfig,
+                        initialWorkWifiCsv = initialWorkWifiCsv,
                         onStartOverlay = ::startOverlay,
                         onStopOverlay = { stopService(CompanionOverlayService.intent(this)) },
                         onToggleStealth = { StealthController.set(this, it) },
+                        onToggleTts = { DailyScriptTracker.setTtsUserEnabled(this, it) },
+                        onSelectScript = { DailyScriptTracker.applyScript(this, it) },
+                        onSaveWorkWifiCsv = { csv ->
+                            WifiStealthConfigStore.saveRawCsv(this, csv)
+                            Toast.makeText(this, "已保存公司/实验室 Wi-Fi 自动隐身列表", Toast.LENGTH_SHORT).show()
+                        },
                         onImportModel = { modelPicker.launch(arrayOf("application/zip", "application/octet-stream")) },
                         onRequestAudioPermission = { audioPermission.launch(Manifest.permission.RECORD_AUDIO) },
                         onSaveAsrConfig = { cfg ->
@@ -104,12 +120,13 @@ class MainActivity : ComponentActivity() {
                         },
                         onSaveHubConfig = { cfg ->
                             HubEndpointStore.save(this, cfg)
-                            if (cfg.baseUrl.isNotBlank()) {
-                                val wsUrl = cfg.baseUrl
-                                    .replaceFirst("https://", "wss://")
-                                    .replaceFirst("http://", "ws://")
+                            val saved = HubEndpointStore.load(this)
+                            if (saved.baseUrl.isNotBlank()) {
+                                val wsUrl = saved.baseUrl
+                                    .replaceFirst("https://", "wss://", ignoreCase = true)
+                                    .replaceFirst("http://", "ws://", ignoreCase = true)
                                     .trimEnd('/') + "/ws"
-                                EventSyncCoordinator.connect(this, wsUrl, cfg.bearerToken.ifBlank { null })
+                                EventSyncCoordinator.connect(this, wsUrl, saved.bearerToken.ifBlank { null })
                             }
                             OfflineReminderScheduler.scheduleWaterFallback(this, 60)
                             Toast.makeText(this, "已保存 Core Hub 地址并开启离线兜底闹钟", Toast.LENGTH_SHORT).show()
@@ -185,9 +202,13 @@ private fun demoDirective(
 fun NekoHomeConsole(
     initialAsrConfig: AsrConfig,
     initialHubConfig: HubEndpointConfig,
+    initialWorkWifiCsv: String,
     onStartOverlay: () -> Unit,
     onStopOverlay: () -> Unit,
     onToggleStealth: (Boolean) -> Unit,
+    onToggleTts: (Boolean) -> Unit,
+    onSelectScript: (TodayScript) -> Unit,
+    onSaveWorkWifiCsv: (String) -> Unit,
     onImportModel: () -> Unit,
     onRequestAudioPermission: () -> Unit,
     onSaveAsrConfig: (AsrConfig) -> Unit,
@@ -198,6 +219,8 @@ fun NekoHomeConsole(
     val state by CharacterStateMachine.currentState.collectAsState()
     val mode by CharacterStateMachine.mode.collectAsState()
     val stealthOffice by CharacterStateMachine.stealthOffice.collectAsState()
+    val todayScript by DailyScriptTracker.todayScript.collectAsState()
+    val ttsEnabled by DailyScriptTracker.ttsUserEnabled.collectAsState()
     val running by OverlayRuntime.running.collectAsState()
     val targetFps by OverlayRuntime.targetFps.collectAsState()
     val measuredFps by OverlayRuntime.measuredFps.collectAsState()
@@ -210,10 +233,10 @@ fun NekoHomeConsole(
     val pendingShareCard by ShareIntakeHandler.pendingCard.collectAsState()
     val shareUploading by ShareIntakeHandler.uploading.collectAsState()
     val shareStatus by ShareIntakeHandler.statusMessage.collectAsState()
-    var ttsEnabled by remember { mutableStateOf(false) }
 
     var hubUrl by remember { mutableStateOf(initialHubConfig.baseUrl) }
     var hubToken by remember { mutableStateOf(initialHubConfig.bearerToken) }
+    var workWifiCsv by remember { mutableStateOf(initialWorkWifiCsv) }
     var asrProvider by remember { mutableStateOf(initialAsrConfig.provider) }
     var asrWsUrl by remember { mutableStateOf(initialAsrConfig.wsUrl) }
     var asrAppId by remember { mutableStateOf(initialAsrConfig.appId) }
@@ -295,7 +318,37 @@ fun NekoHomeConsole(
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Optional TTS (auto-muted in stealth)")
-            Switch(checked = ttsEnabled && !stealthOffice, enabled = !stealthOffice, onCheckedChange = { ttsEnabled = it })
+            Switch(checked = ttsEnabled && !stealthOffice, enabled = !stealthOffice, onCheckedChange = onToggleTts)
+        }
+
+        Text(
+            "今日 3 秒剧本卡 (当前: ${todayScript?.wireName ?: "未选择"})",
+            style = MaterialTheme.typography.titleSmall
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(
+                TodayScript.OFFICE to "上班",
+                TodayScript.WFH to "居家",
+                TodayScript.INTERVIEW to "面试",
+                TodayScript.HOLIDAY to "休假"
+            ).forEach { (script, label) ->
+                if (todayScript == script) {
+                    Button(onClick = { onSelectScript(script) }) { Text(label) }
+                } else {
+                    OutlinedButton(onClick = { onSelectScript(script) }) { Text(label) }
+                }
+            }
+        }
+
+        OutlinedTextField(
+            value = workWifiCsv,
+            onValueChange = { workWifiCsv = it },
+            label = { Text("公司/实验室 Wi-Fi SSID (逗号分隔，自动隐身)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedButton(onClick = { onSaveWorkWifiCsv(workWifiCsv) }) {
+            Text("Save Work Wi-Fi Stealth List")
         }
 
         Text("Directive preview (local, 0 token)", style = MaterialTheme.typography.titleSmall)
@@ -332,6 +385,7 @@ fun NekoHomeConsole(
             onValueChange = { hubUrl = it },
             label = { Text("Hub HTTP URL (e.g. http://10.0.2.2:8787)") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
             modifier = Modifier.fillMaxWidth()
         )
         OutlinedTextField(
@@ -361,6 +415,7 @@ fun NekoHomeConsole(
             onValueChange = { asrWsUrl = it },
             label = { Text("WebSocket URL (wss://...)") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
             modifier = Modifier.fillMaxWidth()
         )
         OutlinedTextField(

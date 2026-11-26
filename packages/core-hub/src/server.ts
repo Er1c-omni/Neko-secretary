@@ -24,6 +24,7 @@ import {
 import { MemoryRepository } from "./memory/repository.ts";
 import { OrchestratorRegistry } from "./orchestrator/registry.ts";
 import { PersonaRenderer, type PersonaIntent } from "./persona/renderer.ts";
+import { DailyScriptPlugin } from "./plugins/daily-script.ts";
 import { ShareIntakePlugin, type ShareCardKind } from "./plugins/share-intake.ts";
 import { SafetyGate, wrapUntrustedExternalData } from "./policy/safety-gate.ts";
 import { ProactiveEngine } from "./proactive/engine.ts";
@@ -45,6 +46,7 @@ export interface HubRuntime {
   orchestrator: OrchestratorRegistry;
   modelGateway: ModelGateway;
   shareIntake: ShareIntakePlugin;
+  dailyScript: DailyScriptPlugin;
   pollSchedulerNow(now?: number): DueJobFire[];
   start(): Promise<{ host: string; port: number }>;
   stop(): Promise<void>;
@@ -74,6 +76,7 @@ interface ServerDeps {
   orchestrator: OrchestratorRegistry;
   modelGateway: ModelGateway;
   shareIntake: ShareIntakePlugin;
+  dailyScript: DailyScriptPlugin;
   broadcastNotification: <TParams>(method: string, params: TParams) => void;
 }
 
@@ -109,6 +112,7 @@ export function createHubRuntime(
     registerConfiguredProviders(modelGateway, config);
   }
   const shareIntake = new ShareIntakePlugin(modelGateway, memory);
+  const dailyScript = new DailyScriptPlugin(memory, persona, scheduler);
 
   const clients = new Set<WebSocket>();
   const broadcastNotification = <TParams>(method: string, params: TParams): void => {
@@ -135,6 +139,7 @@ export function createHubRuntime(
     orchestrator,
     modelGateway,
     shareIntake,
+    dailyScript,
     broadcastNotification,
   };
 
@@ -249,6 +254,7 @@ export function createHubRuntime(
     orchestrator,
     modelGateway,
     shareIntake,
+    dailyScript,
     pollSchedulerNow: (now: number = Date.now()) => {
       const fires = scheduler.pollDueJobs(now);
       for (const fire of fires) {
@@ -362,6 +368,57 @@ async function handleHttpRequest(
           error: err instanceof Error ? err.message : "internal_error",
         }),
       );
+    }
+    return;
+  }
+
+  if (req.method === "GET" && urlPath === "/api/briefing/morning") {
+    if (config.hubToken && req.headers.authorization !== `Bearer ${config.hubToken}`) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const needsPrompt = deps.dailyScript.shouldPromptTodayScript();
+    const currentScript =
+      deps.memory.getWorldState<TodayScript>("today_script")?.value ?? null;
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        needsPrompt,
+        currentScript,
+        promptDirective: needsPrompt ? deps.dailyScript.buildScriptPromptDirective() : null,
+      }),
+    );
+    return;
+  }
+
+  if (req.method === "POST" && urlPath === "/api/script/select") {
+    if (config.hubToken && req.headers.authorization !== `Bearer ${config.hubToken}`) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    try {
+      const rawBody = await readHttpBody(req, 65_536);
+      const body = JSON.parse(rawBody) as { script?: TodayScript };
+      if (
+        body.script !== "office" &&
+        body.script !== "wfh" &&
+        body.script !== "interview" &&
+        body.script !== "holiday"
+      ) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "script must be office|wfh|interview|holiday" }));
+        return;
+      }
+      const briefing = deps.dailyScript.selectScript(body.script);
+      deps.broadcastNotification("directive.push", briefing.directive);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, ...briefing }));
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : "bad_request" }));
     }
     return;
   }
@@ -761,6 +818,15 @@ async function handleRpc(
               const targetJobId = jobId ?? lastFire?.jobId ?? "job_water_hourly";
               const snoozedUntil = deps.scheduler.snoozeJob(targetJobId, 5, now);
               deps.memory.upsertWorldState("water_snooze_until", snoozedUntil ?? now + 5 * 60_000);
+            } else if (
+              actionBase === "script" &&
+              (embeddedJobId === "office" ||
+                embeddedJobId === "wfh" ||
+                embeddedJobId === "interview" ||
+                embeddedJobId === "holiday")
+            ) {
+              const briefing = deps.dailyScript.selectScript(embeddedJobId, now);
+              sendWsNotification(ws, "directive.push", briefing.directive);
             }
           } else if (
             ingest.route === "wake_agent" &&
@@ -910,15 +976,21 @@ async function handleRpc(
       }
       case "state.setScript": {
         const { script } = (req.params ?? {}) as { script?: TodayScript };
-        if (!script) {
+        if (
+          script !== "office" &&
+          script !== "wfh" &&
+          script !== "interview" &&
+          script !== "holiday"
+        ) {
           return {
             jsonrpc: "2.0",
             id: req.id,
-            error: { code: -32602, message: "Missing script parameter" },
+            error: { code: -32602, message: "Missing or invalid script parameter" },
           };
         }
-        const entry = deps.memory.upsertWorldState("today_script", script);
-        return { jsonrpc: "2.0", id: req.id, result: entry };
+        const briefing = deps.dailyScript.selectScript(script);
+        sendWsNotification(ws, "directive.push", briefing.directive);
+        return { jsonrpc: "2.0", id: req.id, result: briefing };
       }
       case "mode.switch": {
         const { mode, stealthOffice = false, ttsAllowed = false } = (req.params ?? {}) as {

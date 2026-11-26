@@ -27,6 +27,7 @@ class PlaceholderNekoBackend : Live2DModelBackend {
     private var uGlasses = 0
     private var uSleepy = 0
     private var uAlert = 0
+    private var uMouth = 0
     private var quad: FloatBuffer? = null
     private var aspect = 1f
 
@@ -34,9 +35,10 @@ class PlaceholderNekoBackend : Live2DModelBackend {
     private var nextBlinkAt = 2.5f
     private var blinkPhase = -1f
     private var bounceRemaining = 0f
+    @Volatile private var mouthOpen = 0f
     @Volatile private var look = CharacterLook(CharacterStateId.PEEK_IDLE)
 
-    override val isMotionActive: Boolean get() = bounceRemaining > 0f
+    override val isMotionActive: Boolean get() = bounceRemaining > 0f || mouthOpen > 0.02f
 
     override fun onGlContextCreated() {
         program = linkProgram(VERTEX_SHADER, FRAGMENT_SHADER)
@@ -49,6 +51,7 @@ class PlaceholderNekoBackend : Live2DModelBackend {
         uGlasses = GLES20.glGetUniformLocation(program, "uGlasses")
         uSleepy = GLES20.glGetUniformLocation(program, "uSleepy")
         uAlert = GLES20.glGetUniformLocation(program, "uAlert")
+        uMouth = GLES20.glGetUniformLocation(program, "uMouth")
         quad = ByteBuffer.allocateDirect(QUAD.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
             put(QUAD); position(0)
         }
@@ -67,6 +70,10 @@ class PlaceholderNekoBackend : Live2DModelBackend {
 
     override fun onTap(xNorm: Float, yNorm: Float) {
         bounceRemaining = BOUNCE_SECONDS
+    }
+
+    override fun setMouthOpen(level: Float) {
+        mouthOpen = level.coerceIn(0f, 1f)
     }
 
     override fun onDrawFrame(deltaSeconds: Float) {
@@ -98,6 +105,7 @@ class PlaceholderNekoBackend : Live2DModelBackend {
         GLES20.glUniform1f(uGlasses, if (secretary) 1f else 0f)
         GLES20.glUniform1f(uSleepy, if (l.state == CharacterStateId.SLEEPY_NIGHT) 1f else 0f)
         GLES20.glUniform1f(uAlert, if (alert) 1f else 0f)
+        GLES20.glUniform1f(uMouth, mouthOpen)
         val buffer = quad ?: return
         buffer.position(0)
         GLES20.glEnableVertexAttribArray(aPos)
@@ -152,6 +160,7 @@ class PlaceholderNekoBackend : Live2DModelBackend {
             uniform float uGlasses;
             uniform float uSleepy;
             uniform float uAlert;
+            uniform float uMouth;
 
             float sdTri(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
                 vec2 e0 = p1 - p0; vec2 e1 = p2 - p1; vec2 e2 = p0 - p2;
@@ -199,6 +208,10 @@ class PlaceholderNekoBackend : Live2DModelBackend {
                 float blushL = length((hp - vec2(-0.30, -0.15)) * vec2(1.0, 1.8)) - 0.07;
                 float blushR = length((hp - vec2(0.30, -0.15)) * vec2(1.0, 1.8)) - 0.07;
                 col = mix(col, vec3(1.0, 0.55, 0.6), 0.55 * fill(min(blushL, blushR)));
+
+                float mouthH = mix(0.012, 0.085, uMouth);
+                float mouth = length((hp - vec2(0.0, -0.19)) * vec2(1.0 / 0.07, 1.0 / mouthH)) - 1.0;
+                col = mix(col, vec3(0.45, 0.15, 0.22), step(0.02, uMouth) * fill(mouth * 0.04));
 
                 float ringL = abs(length(hp - vec2(-0.19, -0.02)) - 0.11) - 0.012;
                 float ringR = abs(length(hp - vec2(0.19, -0.02)) - 0.11) - 0.012;

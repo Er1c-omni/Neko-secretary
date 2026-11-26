@@ -58,12 +58,12 @@
 ## Week 2：生活场景丰满 + 实用痛点拉满
 
 ### Day 8–9：每日 3 秒剧本 + 防社死自动化 + 可选 TTS — 🟢 `[Hydrogen High]`（口型同步子项按需切 🟣）
-- 目标文件：`packages/core-hub/src/plugins/`、`apps/android/app/src/main/java/com/neko/secretary/voice/VoicePipeline.kt`、`Live2DTextureRenderer.kt`
+- 目标文件：`packages/core-hub/src/plugins/daily-script.ts`、`apps/android/app/src/main/java/com/neko/secretary/perception/WifiMonitor.kt`、`apps/android/app/src/main/java/com/neko/secretary/voice/CachedTtsEngine.kt`、`apps/android/app/src/main/java/com/neko/secretary/overlay/DailyScriptTracker.kt`、`Live2DTextureRenderer.kt`
 - 切换提示：剧本卡、Wi-Fi 监听与缓存短句播放用 `Hydrogen High`；若要做 TTS 实时音频流 RMS 音量驱动 Live2D 口型同步（Lip-sync），临时切 `Opus 5.5 Medium`。
-- [ ] 实现每日首次解锁弹出“今日 3 秒剧本卡”（`office` / `wfh` / `interview` / `holiday`）及晨间简报插件
-- [ ] 接入 `WifiMonitor` 监听公司/实验室 Wi-Fi SSID 自动切换 `STEALTH_OFFICE`
-- [ ] 实现可选 TTS 模块（默认关闭/仅居家开启），提前缓存 20+ 条 CosyVoice/豆包情绪短句音频驱动 Live2D 口型同步
-- [ ] 验收：连上公司 Wi-Fi 自动隐身静音；在家切 `wfh` 剧本开启温和语音提醒
+- [x] 实现每日首次解锁弹出“今日 3 秒剧本卡”（`office` / `wfh` / `interview` / `holiday`）及零 Token 晨间简报插件（`DailyScriptPlugin` + `GET /api/briefing/morning` / `POST /api/script/select` + Android `DailyScriptTracker` 首次解锁 `ACTION_USER_PRESENT` 自动触发与控制台一键切换）
+- [x] 接入 `WifiMonitor`（`ConnectivityManager.NetworkCallback` + `AudioManager` 耳机检测 + `WifiStealthConfigStore` 用户自定义 SSID 零硬编码）监听公司/实验室 Wi-Fi 自动切换 `STEALTH_OFFICE` 并上报 `sensor.wifi_changed`
+- [x] 实现可选 TTS 模块 `CachedTtsPlayer`（默认关闭、隐身态或公司 Wi-Fi 未戴耳机强制静默），内置 24 条 CosyVoice/豆包情绪短句索引（`TtsPhraseCatalog`），支持本地缓存 `.wav`/`.pcm` 实时 RMS 音量包络驱动 Live2D 口型同步（`PlaceholderNekoBackend` `uMouth` + `CubismModelBackend` `ParamMouthOpenY` + 60 FPS 自动提频）
+- [x] 验收：核心策略与闭环通过 `pnpm typecheck && pnpm test`（18/18）及 Android `:app:testDebugUnitTest`（44/44）与 `:app:assembleDebug`；同步修复了 `Pixel_7` 实测发现的明文私网 HTTP/WS 限制（`usesCleartextTraffic`）、中文输入法全角 URL 标点与浅色状态栏图标问题
 
 ### Day 10–11：死线雷达 + 考前速览 + 碎片/周报管理 — 🟢 `[Hydrogen High]`
 - 目标文件：`apps/android/app/src/main/java/com/neko/secretary/perception/ShareIntakeHandler.kt`、`packages/core-hub/src/plugins/`

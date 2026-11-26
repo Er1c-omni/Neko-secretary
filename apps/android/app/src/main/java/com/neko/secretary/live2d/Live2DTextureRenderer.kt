@@ -85,6 +85,11 @@ class Live2DTextureRenderer(
         thread?.enqueue { it.onTap(xNorm, yNorm) }
     }
 
+    fun setMouthOpen(level: Float) {
+        val clamped = level.coerceIn(0f, 1f)
+        thread?.enqueue { it.setMouthOpen(clamped) }
+    }
+
     /** True when (x, y) in TextureView pixels hits the character (with finger tolerance). */
     fun hitTest(x: Float, y: Float): Boolean = hitMask?.isNearOpaque(x, y) ?: true
 

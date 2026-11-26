@@ -32,6 +32,9 @@ interface Live2DModelBackend {
     /** Tap reaction; coordinates normalised to the canvas, (0,0) = top-left. */
     fun onTap(xNorm: Float, yNorm: Float) = Unit
 
+    /** Live2D lip-sync mouth open level (0f = closed, 1f = fully open). */
+    fun setMouthOpen(level: Float) = Unit
+
     /** True while a non-idle motion is playing (keeps 60 FPS boosted). */
     val isMotionActive: Boolean get() = false
 

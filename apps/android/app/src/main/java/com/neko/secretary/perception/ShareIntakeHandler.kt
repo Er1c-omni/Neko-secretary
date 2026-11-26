@@ -76,8 +76,14 @@ object HubEndpointStore {
     }
 
     fun save(context: Context, config: HubEndpointConfig) {
+        val normalizedUrl = config.baseUrl
+            .trim()
+            .replace('。', '.')
+            .replace('：', ':')
+            .replace('／', '/')
+            .trimEnd('/')
         prefs(context).edit()
-            .putString(KEY_URL, config.baseUrl.trim().trimEnd('/'))
+            .putString(KEY_URL, normalizedUrl)
             .putString(KEY_TOKEN, config.bearerToken.trim())
             .apply()
     }

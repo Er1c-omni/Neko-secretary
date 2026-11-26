@@ -50,12 +50,17 @@ import com.neko.secretary.live2d.FramePacingPolicy
 import com.neko.secretary.live2d.Live2DModelRepository
 import com.neko.secretary.live2d.Live2DTextureRenderer
 import com.neko.secretary.live2d.RenderConditions
+import com.neko.secretary.perception.WifiMonitor
+import com.neko.secretary.perception.WifiStealthConfigStore
+import com.neko.secretary.perception.WifiStealthEvaluator
 import com.neko.secretary.protocol.AssistantMode
 import com.neko.secretary.protocol.CharacterDirective
 import com.neko.secretary.protocol.CharacterStateId
 import com.neko.secretary.protocol.DirectiveAction
+import com.neko.secretary.protocol.TodayScript
 import com.neko.secretary.sync.EventSyncCoordinator
 import com.neko.secretary.sync.OfflineReminderScheduler
+import com.neko.secretary.voice.CachedTtsPlayer
 import com.neko.secretary.voice.StreamingVoicePipeline
 import com.neko.secretary.voice.VoiceEventFactory
 import com.neko.secretary.voice.VoiceGestureMachine
@@ -94,6 +99,8 @@ class CompanionOverlayService : Service() {
     private lateinit var bubble: BubbleWindow
     private lateinit var voicePipeline: StreamingVoicePipeline
     private lateinit var voiceGesture: VoiceGestureMachine
+    private lateinit var wifiMonitor: WifiMonitor
+    private lateinit var ttsPlayer: CachedTtsPlayer
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -141,7 +148,13 @@ class CompanionOverlayService : Service() {
             screenInteractive = when (intent.action) {
                 Intent.ACTION_SCREEN_OFF -> false
                 Intent.ACTION_SCREEN_ON -> !isKeyguardLocked()
-                Intent.ACTION_USER_PRESENT -> true
+                Intent.ACTION_USER_PRESENT -> {
+                    if (DailyScriptTracker.shouldPromptToday(this@CompanionOverlayService)) {
+                        DailyScriptTracker.markPromptedToday(this@CompanionOverlayService)
+                        CharacterStateMachine.applyDirective(DailyScriptTracker.buildFirstUnlockDirective())
+                    }
+                    true
+                }
                 else -> screenInteractive
             }
             if (!screenInteractive) bubble.hide()
@@ -175,6 +188,7 @@ class CompanionOverlayService : Service() {
         touchSlop = ViewConfiguration.get(this).scaledTouchSlop
 
         StealthController.restore(this)
+        DailyScriptTracker.restore(this)
         EventSyncCoordinator.ensureInitialized(this)
         if (OverlayRuntime.onVoiceTranscriptEvent == null) {
             OverlayRuntime.onVoiceTranscriptEvent = { eventJson ->
@@ -182,6 +196,11 @@ class CompanionOverlayService : Service() {
             }
         }
         renderer = Live2DTextureRenderer(this) { Live2DModelRepository.resolveActiveModel(this) }
+        ttsPlayer = CachedTtsPlayer(this) { mouthLevel ->
+            if (::renderer.isInitialized) renderer.setMouthOpen(mouthLevel)
+        }
+        ttsPlayer.userEnabled = DailyScriptTracker.ttsUserEnabled.value
+        wifiMonitor = WifiMonitor(this).also { it.start() }
         bubble = BubbleWindow(
             context = this,
             windowManager = windowManager,
@@ -233,6 +252,8 @@ class CompanionOverlayService : Service() {
         if (::bubble.isInitialized) bubble.hide()
         root?.let { view -> runCatching { windowManager.removeView(view) } }
         root = null
+        if (::wifiMonitor.isInitialized) wifiMonitor.stop()
+        if (::ttsPlayer.isInitialized) ttsPlayer.release()
         if (::voicePipeline.isInitialized) voicePipeline.release()
         if (::renderer.isInitialized) renderer.release()
         OverlayRuntime._voiceActive.value = false
@@ -637,6 +658,13 @@ class CompanionOverlayService : Service() {
                 OfflineReminderScheduler.scheduleWaterFallback(this, 5)
                 showBubble("好哒，5 分钟后再提醒你喝水~")
             }
+            "script" -> {
+                val scriptName = action.id.substringAfter(":", "").uppercase()
+                val script = runCatching { TodayScript.valueOf(scriptName) }.getOrNull()
+                if (script != null) {
+                    DailyScriptTracker.applyScript(this, script)
+                }
+            }
             else -> showBubble("已收到：${action.label}")
         }
         mainHandler.removeCallbacks(settleRunnable)
@@ -688,7 +716,15 @@ class CompanionOverlayService : Service() {
             CharacterStateMachine.lastDirective.collect { directive -> directive?.let { onDirective(it) } }
         }
         scope.launch {
-            CharacterStateMachine.stealthOffice.collect { stealth -> onStealthChanged(stealth) }
+            DailyScriptTracker.ttsUserEnabled.collect { enabled ->
+                if (::ttsPlayer.isInitialized) ttsPlayer.userEnabled = enabled
+            }
+        }
+        scope.launch {
+            CharacterStateMachine.stealthOffice.collect { stealth ->
+                if (stealth && ::ttsPlayer.isInitialized) ttsPlayer.stop()
+                onStealthChanged(stealth)
+            }
         }
         scope.launch { renderer.motionActive.collect { refreshFps() } }
         scope.launch { renderer.measuredFps.collect { OverlayRuntime._measuredFps.value = it } }
@@ -730,6 +766,22 @@ class CompanionOverlayService : Service() {
         if (directive.state != CharacterStateId.PEEK_IDLE && directive.state != CharacterStateId.DOCK_STANDBY) {
             expandFromEdge()
             if (directive.text.isNotBlank()) showBubble(directive.text, minimal = false, actions = directive.actions)
+            if (directive.ttsAllowed && ::ttsPlayer.isInitialized && ::wifiMonitor.isInitialized) {
+                val wifiDecision = WifiStealthEvaluator.evaluate(
+                    rawSsid = wifiMonitor.currentSsid.value,
+                    configuredWorkSsids = WifiStealthConfigStore.loadSsidSet(this),
+                    headphonesConnected = wifiMonitor.areHeadphonesConnected(),
+                    userTtsEnabled = DailyScriptTracker.ttsUserEnabled.value,
+                    manualStealthOffice = stealthLayout || directive.stealthOverride
+                )
+                if (wifiDecision.ttsEffectiveAllowed) {
+                    ttsPlayer.playCachedOrSynthesize(
+                        cacheKey = directive.ttsCacheKey,
+                        dynamicText = directive.text,
+                        stealthOffice = false
+                    )
+                }
+            }
             mainHandler.removeCallbacks(settleRunnable)
             mainHandler.postDelayed(settleRunnable, DIRECTIVE_SETTLE_MS)
             scheduleAutoRetract()
