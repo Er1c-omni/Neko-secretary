@@ -16,9 +16,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -40,6 +43,8 @@ import com.neko.secretary.live2d.Live2DModelRepository
 import com.neko.secretary.overlay.CompanionOverlayService
 import com.neko.secretary.overlay.OverlayRuntime
 import com.neko.secretary.overlay.StealthController
+import com.neko.secretary.perception.HubEndpointConfig
+import com.neko.secretary.perception.HubEndpointStore
 import com.neko.secretary.perception.ShareIntakeHandler
 import com.neko.secretary.protocol.AssistantMode
 import com.neko.secretary.protocol.CharacterDirective
@@ -78,11 +83,13 @@ class MainActivity : ComponentActivity() {
         }
 
         val initialAsrConfig = AsrConfigStore.load(this)
+        val initialHubConfig = HubEndpointStore.load(this)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     NekoHomeConsole(
                         initialAsrConfig = initialAsrConfig,
+                        initialHubConfig = initialHubConfig,
                         onStartOverlay = ::startOverlay,
                         onStopOverlay = { stopService(CompanionOverlayService.intent(this)) },
                         onToggleStealth = { StealthController.set(this, it) },
@@ -91,7 +98,13 @@ class MainActivity : ComponentActivity() {
                         onSaveAsrConfig = { cfg ->
                             AsrConfigStore.save(this, cfg)
                             Toast.makeText(this, "已保存 ASR 配置 (${cfg.provider.wireName})", Toast.LENGTH_SHORT).show()
-                        }
+                        },
+                        onSaveHubConfig = { cfg ->
+                            HubEndpointStore.save(this, cfg)
+                            Toast.makeText(this, "已保存 Core Hub 地址", Toast.LENGTH_SHORT).show()
+                        },
+                        onConfirmShareCard = { ShareIntakeHandler.confirmPending(this) },
+                        onDismissShareCard = { ShareIntakeHandler.dismissPending(this) }
                     )
                 }
             }
@@ -105,7 +118,7 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent?.action == Intent.ACTION_SEND) {
-            ShareIntakeHandler.extractSharedPayload(intent)
+            ShareIntakeHandler.ingestIntent(this, intent)
         }
     }
 
@@ -154,12 +167,16 @@ private fun demoDirective(state: CharacterStateId, text: String, mode: Assistant
 @Composable
 fun NekoHomeConsole(
     initialAsrConfig: AsrConfig,
+    initialHubConfig: HubEndpointConfig,
     onStartOverlay: () -> Unit,
     onStopOverlay: () -> Unit,
     onToggleStealth: (Boolean) -> Unit,
     onImportModel: () -> Unit,
     onRequestAudioPermission: () -> Unit,
-    onSaveAsrConfig: (AsrConfig) -> Unit
+    onSaveAsrConfig: (AsrConfig) -> Unit,
+    onSaveHubConfig: (HubEndpointConfig) -> Unit,
+    onConfirmShareCard: () -> Unit,
+    onDismissShareCard: () -> Unit
 ) {
     val state by CharacterStateMachine.currentState.collectAsState()
     val mode by CharacterStateMachine.mode.collectAsState()
@@ -173,8 +190,13 @@ fun NekoHomeConsole(
     val voiceActive by OverlayRuntime.voiceActive.collectAsState()
     val voiceProvider by OverlayRuntime.voiceProvider.collectAsState()
     val lastTranscript by OverlayRuntime.lastTranscript.collectAsState()
+    val pendingShareCard by ShareIntakeHandler.pendingCard.collectAsState()
+    val shareUploading by ShareIntakeHandler.uploading.collectAsState()
+    val shareStatus by ShareIntakeHandler.statusMessage.collectAsState()
     var ttsEnabled by remember { mutableStateOf(false) }
 
+    var hubUrl by remember { mutableStateOf(initialHubConfig.baseUrl) }
+    var hubToken by remember { mutableStateOf(initialHubConfig.bearerToken) }
     var asrProvider by remember { mutableStateOf(initialAsrConfig.provider) }
     var asrWsUrl by remember { mutableStateOf(initialAsrConfig.wsUrl) }
     var asrAppId by remember { mutableStateOf(initialAsrConfig.appId) }
@@ -182,6 +204,8 @@ fun NekoHomeConsole(
 
     Column(
         modifier = Modifier
+            .fillMaxSize()
+            .safeDrawingPadding()
             .padding(20.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -199,6 +223,37 @@ fun NekoHomeConsole(
                 if (lastTranscript.isNotBlank()) " | last: $lastTranscript" else "",
             style = MaterialTheme.typography.bodySmall
         )
+
+        if (shareUploading || pendingShareCard != null || shareStatus != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = if (shareUploading) "截图分享解析中…" else "分享解析卡片 (${pendingShareCard?.kind ?: "status"})",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    pendingShareCard?.let { card ->
+                        Text(card.title, style = MaterialTheme.typography.titleMedium)
+                        Text(card.summary, style = MaterialTheme.typography.bodyMedium)
+                        if (card.amount != null) {
+                            Text("金额：${card.currency ?: "CNY"} ${card.amount}", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = onConfirmShareCard) { Text("一键入库") }
+                            OutlinedButton(onClick = onDismissShareCard) { Text("忽略") }
+                        }
+                    }
+                    shareStatus?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onStartOverlay) { Text("Start Overlay") }
@@ -243,6 +298,26 @@ fun NekoHomeConsole(
                     demoDirective(CharacterStateId.SLEEPY_NIGHT, "已经很晚了，早点休息吧~", mode)
                 )
             }) { Text("Sleepy") }
+        }
+
+        HorizontalDivider()
+        Text("Core Hub Endpoint (截图吞噬 & 同步)", style = MaterialTheme.typography.titleSmall)
+        OutlinedTextField(
+            value = hubUrl,
+            onValueChange = { hubUrl = it },
+            label = { Text("Hub HTTP URL (e.g. http://10.0.2.2:8787)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = hubToken,
+            onValueChange = { hubToken = it },
+            label = { Text("Hub Bearer Token (optional)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Button(onClick = { onSaveHubConfig(HubEndpointConfig(hubUrl, hubToken)) }) {
+            Text("Save Hub Config")
         }
 
         HorizontalDivider()

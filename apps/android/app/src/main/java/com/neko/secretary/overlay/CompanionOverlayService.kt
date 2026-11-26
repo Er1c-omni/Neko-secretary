@@ -256,6 +256,10 @@ class CompanionOverlayService : Service() {
             addView(texture)
             addView(badgeView)
             setOnTouchListener { _, event -> onPetTouch(event) }
+            addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) = refreshFps()
+                override fun onViewDetachedFromWindow(v: View) = refreshFps()
+            })
         }
         root = container
 

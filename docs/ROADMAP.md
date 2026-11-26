@@ -29,7 +29,8 @@
 - [x] 为 `apps/android` 补齐 Gradle Wrapper（8.11.1），配置 `live2d-core/` 条件编译（`cubismEnabled`）与 `CubismModelBackend` 真实 SDK 适配层，无闭源 SDK 时自动回退透明 SDF 占位桌宠（`PlaceholderNekoBackend`）并支持运行时 `.zip` 模型包安全导入（含 Zip-Slip 与体积防护）；已通过 `:app:testDebugUnitTest` 与 `:app:assembleDebug`
 - [x] 完善 `Live2DTextureRenderer`（`EglCore` RGBA8888 透明离屏 pbuffer 保活 + 独立 `Live2DRenderThread` + `EGL_CONTEXT_LOST` 重建 + `FramePacingPolicy` 60/20/10/0 FPS 自适应切换 + `HitTestMask` Alpha 命中网格）
 - [x] 完善 `CompanionOverlayService` 拖拽甩边吸附、左右贴边潜伏（`PEEK_IDLE` 42% 露出 + 点击展开/独立 `BubbleWindow` 气泡弹窗 + 超时自动回缩）、透明区域点击透传（`FLAG_NOT_TOUCHABLE` + Android 12+ `maximumObscuringOpacityForTouch` 兼容）与 **职场防社死一键隐身开关**（通知栏快捷操作 + `StealthTileService` 下拉磁贴 + 控制台开关，隐身/息屏/锁屏自动 0 FPS 挂起 GL 线程）
-- [ ] （待真机与官方 SDK 补充）在 Android Studio 放入官方闭源 Live2D Cubism SDK（按 `apps/android/live2d-core/README.md`）并完成真机挂机实测：桌宠贴边不挡屏、点按气泡交互、锁屏/隐身 GPU 归零
+- [x] 模拟器实测（`Pixel_7` Android 16 硬件 GPU）：已实测桌宠透明贴边潜伏（42% 露出）、点击展开与气泡弹窗（60 FPS 提频）、拖拽竖向重定位吸附、一键防社死隐身折叠徽章（`0 FPS` + 禁用 TTS）及 `ACTION_SEND` 分享解析卡片；修复了 API 35/36 顶栏遮挡与首次 attach 帧率刷新问题
+- [ ] （待真机与官方 SDK 补充）在 Android Studio 放入官方闭源 Live2D Cubism SDK（按 `apps/android/live2d-core/README.md`）并完成真机挂机功耗实测
 
 ### Day 4：即时流式语音输入（ASR） — 🟣 `[Opus 5.5 Medium]`
 - 目标文件：`apps/android/app/src/main/java/com/neko/secretary/voice/VoicePipeline.kt`
@@ -39,9 +40,10 @@
 - [ ] （待真机/API Key 补充）配置真实火山引擎或 FunASR 密钥，在真机/模拟器验证麦克风实时流式识别与 Core Hub 联动
 
 ### Day 5：截图分享一键吞噬 — 🟢 `[Hydrogen High]`
-- 目标文件：`apps/android/app/src/main/java/com/neko/secretary/perception/ShareIntakeHandler.kt`、`packages/core-hub/src/plugins/`
-- [ ] 完善 `ShareIntakeHandler` 与服务端截图上传接口，接入 Vision 模型解析截图为日程 / 死线 / 账单 / 灵感待确认卡片
-- [ ] 验收：微信/邮件截完图点“分享给助理”，3 秒内桌宠弹出解析卡片并一键写入库
+- 目标文件：`apps/android/app/src/main/java/com/neko/secretary/perception/ShareIntakeHandler.kt`、`packages/core-hub/src/plugins/share-intake.ts`、`packages/core-hub/src/server.ts`
+- [x] 实现 `ShareIntakePlugin`（严格使用 `wrapUntrustedExternalData` 包裹不可信外部文本 + Vision/Fast 模型结构化解析 + 账单/死线/日程/灵感启发式兜底）与 Core Hub `POST /api/share/intake`、`POST /api/share/confirm`、`POST /api/share/dismiss` 接口（`idempotencyKey` 去重、`directive.push` 广播与一键写入 `memories` + `prospective_items`）
+- [x] 完善 Android `ShareIntakeHandler`（`ACTION_SEND` 图片压缩转 Base64 + SHA-256 幂等键 + Ktor 上传 + 离线预览卡片）与 `MainActivity` 分享确认卡片 UI（`[一键入库]` / `[忽略]` + Hub Endpoint 配置）；已通过 `pnpm typecheck && pnpm test`（14/14）、`:app:testDebugUnitTest`（38/38）与 `Pixel_7` 模拟器 `ACTION_SEND` 实测
+- [ ] （待真机/Vision API Key 补充）在真机微信/邮件截完图分享给助理，联调公网 Vision 模型 3 秒内端到端入库
 
 ### Day 6–7：第一条完整主动提醒闭环 — 🟣 `[Opus 5.5 Medium]`
 - 目标文件：`packages/core-hub/src/scheduler/scheduler.ts`、`apps/android/app/src/main/java/com/neko/secretary/sync/TransportClient.kt`

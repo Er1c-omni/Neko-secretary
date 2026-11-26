@@ -24,6 +24,7 @@ import {
 import { MemoryRepository } from "./memory/repository.ts";
 import { OrchestratorRegistry } from "./orchestrator/registry.ts";
 import { PersonaRenderer } from "./persona/renderer.ts";
+import { ShareIntakePlugin, type ShareCardKind } from "./plugins/share-intake.ts";
 import { SafetyGate, wrapUntrustedExternalData } from "./policy/safety-gate.ts";
 import { ProactiveEngine } from "./proactive/engine.ts";
 import { HybridScheduler } from "./scheduler/scheduler.ts";
@@ -39,6 +40,7 @@ export interface HubRuntime {
   scheduler: HybridScheduler;
   orchestrator: OrchestratorRegistry;
   modelGateway: ModelGateway;
+  shareIntake: ShareIntakePlugin;
   start(): Promise<{ host: string; port: number }>;
   stop(): Promise<void>;
 }
@@ -64,6 +66,7 @@ interface ServerDeps {
   safetyGate: SafetyGate;
   orchestrator: OrchestratorRegistry;
   modelGateway: ModelGateway;
+  shareIntake: ShareIntakePlugin;
   broadcastNotification: <TParams>(method: string, params: TParams) => void;
 }
 
@@ -98,6 +101,7 @@ export function createHubRuntime(
   if (!options.modelGateway) {
     registerConfiguredProviders(modelGateway, config);
   }
+  const shareIntake = new ShareIntakePlugin(modelGateway, memory);
 
   const clients = new Set<WebSocket>();
   const broadcastNotification = <TParams>(method: string, params: TParams): void => {
@@ -121,6 +125,7 @@ export function createHubRuntime(
     safetyGate,
     orchestrator,
     modelGateway,
+    shareIntake,
     broadcastNotification,
   };
 
@@ -174,6 +179,7 @@ export function createHubRuntime(
     scheduler,
     orchestrator,
     modelGateway,
+    shareIntake,
     start: () =>
       new Promise((resolve, reject) => {
         httpServer.once("error", reject);
@@ -279,6 +285,172 @@ async function handleHttpRequest(
           error: err instanceof Error ? err.message : "internal_error",
         }),
       );
+    }
+    return;
+  }
+
+  if (req.method === "POST" && urlPath === "/api/share/intake") {
+    if (config.hubToken && req.headers.authorization !== `Bearer ${config.hubToken}`) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+
+    try {
+      const rawBody = await readHttpBody(req, 10_485_760);
+      const body = JSON.parse(rawBody) as {
+        text?: string;
+        imageBase64?: string;
+        imageMimeType?: string;
+        idempotencyKey?: string;
+        mode?: AssistantMode;
+        stealthOffice?: boolean;
+        ttsAllowed?: boolean;
+      };
+
+      const hasImage = typeof body.imageBase64 === "string" && body.imageBase64.trim().length > 0;
+      const hasText = typeof body.text === "string" && body.text.trim().length > 0;
+      if (!hasImage && !hasText) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "text or imageBase64 is required" }));
+        return;
+      }
+
+      const envelope = createEventEnvelope({
+        idempotencyKey: body.idempotencyKey ?? `android:share:${randomUUID()}`,
+        type: hasImage ? "share.screenshot" : "share.text_or_url",
+        source: "android",
+        payload: {
+          text: body.text?.trim() ?? "",
+          hasImage,
+          imageMimeType: body.imageMimeType ?? null,
+        },
+      });
+      const ingest = deps.eventBus.ingest(envelope);
+      const analyzed = await deps.shareIntake.analyze({
+        text: body.text,
+        imageBase64: body.imageBase64,
+        imageMimeType: body.imageMimeType,
+      });
+
+      const mode =
+        body.mode ??
+        deps.memory.getWorldState<AssistantMode>("current_mode")?.value ??
+        "life";
+      const stealthOffice =
+        body.stealthOffice ??
+        deps.memory.getWorldState<boolean>("stealth_office")?.value ??
+        false;
+      const baseDirective = deps.persona.render({
+        mode,
+        stealthOffice,
+        ttsAllowed: body.ttsAllowed ?? false,
+        intent: analyzed.card.kind === "deadline" ? "deadline_alert" : "generic_reply",
+        summaryText: `[${analyzed.card.kind}] ${analyzed.card.title}：${analyzed.card.summary}`,
+      });
+      const directive: CharacterDirective = {
+        ...baseDirective,
+        actions: [
+          { id: `share.confirm:${analyzed.card.cardId}`, label: "一键入库" },
+          { id: `share.dismiss:${analyzed.card.cardId}`, label: "忽略" },
+        ],
+      };
+      deps.broadcastNotification("directive.push", directive);
+
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          deduplicated: ingest.deduplicated,
+          route: ingest.route,
+          card: analyzed.card,
+          directive,
+          model: analyzed.model,
+        }),
+      );
+    } catch (err) {
+      const status = err instanceof SyntaxError ? 400 : 500;
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          error: err instanceof Error ? err.message : "internal_error",
+        }),
+      );
+    }
+    return;
+  }
+
+  if (req.method === "POST" && urlPath === "/api/share/confirm") {
+    if (config.hubToken && req.headers.authorization !== `Bearer ${config.hubToken}`) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+
+    try {
+      const rawBody = await readHttpBody(req, 262_144);
+      const body = JSON.parse(rawBody) as {
+        cardId?: string;
+        title?: string;
+        summary?: string;
+        kind?: ShareCardKind;
+        dueAt?: number | null;
+        tags?: string[];
+      };
+      if (typeof body.cardId !== "string" || body.cardId.trim().length === 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "cardId is required" }));
+        return;
+      }
+
+      const result = deps.shareIntake.confirm(body.cardId.trim(), {
+        title: body.title,
+        summary: body.summary,
+        kind: body.kind,
+        dueAt: body.dueAt,
+        tags: body.tags,
+      });
+      if (!result) {
+        res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "card_not_found" }));
+        return;
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, ...result }));
+    } catch (err) {
+      const status = err instanceof SyntaxError ? 400 : 500;
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify({
+          error: err instanceof Error ? err.message : "internal_error",
+        }),
+      );
+    }
+    return;
+  }
+
+  if (req.method === "POST" && urlPath === "/api/share/dismiss") {
+    if (config.hubToken && req.headers.authorization !== `Bearer ${config.hubToken}`) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    try {
+      const rawBody = await readHttpBody(req, 65_536);
+      const body = JSON.parse(rawBody) as { cardId?: string };
+      if (typeof body.cardId !== "string" || body.cardId.trim().length === 0) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "cardId is required" }));
+        return;
+      }
+      const dismissed = deps.shareIntake.dismiss(body.cardId.trim());
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, dismissed }));
+    } catch (err) {
+      const status = err instanceof SyntaxError ? 400 : 500;
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : "internal_error" }));
     }
     return;
   }
