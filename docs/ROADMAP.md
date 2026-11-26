@@ -26,10 +26,10 @@
 ### Day 2–3：Android 悬浮窗 + Live2D 进阶渲染 — 🟣 `[Opus 5.5 Medium]`
 - 目标文件：`apps/android/app/src/main/java/com/neko/secretary/live2d/Live2DTextureRenderer.kt`、`apps/android/app/src/main/java/com/neko/secretary/overlay/CompanionOverlayService.kt`
 - 切换原因：需处理独立 EGL 渲染线程生命周期、`TextureView` 透明通道合成、非人物区域点击透传（不遮挡下层 App）及 60/20/10/0 FPS 自适应降频。
-- [ ] 在 Android Studio 导入 `apps/android` 并放入官方 Live2D Cubism SDK（按 `apps/android/live2d-core/README.md`）
-- [ ] 完善 `Live2DTextureRenderer` 真实 Cubism 模型加载、透明背景、60/20/10/0 FPS 自适应切换
-- [ ] 完善 `CompanionOverlayService` 拖拽、左右贴边潜伏（`PEEK_IDLE`）、透明区域点击透传与 **职场防社死一键隐身开关**
-- [ ] 验收：桌宠稳定挂在手机边缘不挡屏，点按切换展示与气泡弹窗，锁屏/隐身时 GPU 降为 0
+- [x] 为 `apps/android` 补齐 Gradle Wrapper（8.11.1），配置 `live2d-core/` 条件编译（`cubismEnabled`）与 `CubismModelBackend` 真实 SDK 适配层，无闭源 SDK 时自动回退透明 SDF 占位桌宠（`PlaceholderNekoBackend`）并支持运行时 `.zip` 模型包安全导入（含 Zip-Slip 与体积防护）；已通过 `:app:testDebugUnitTest` 与 `:app:assembleDebug`
+- [x] 完善 `Live2DTextureRenderer`（`EglCore` RGBA8888 透明离屏 pbuffer 保活 + 独立 `Live2DRenderThread` + `EGL_CONTEXT_LOST` 重建 + `FramePacingPolicy` 60/20/10/0 FPS 自适应切换 + `HitTestMask` Alpha 命中网格）
+- [x] 完善 `CompanionOverlayService` 拖拽甩边吸附、左右贴边潜伏（`PEEK_IDLE` 42% 露出 + 点击展开/独立 `BubbleWindow` 气泡弹窗 + 超时自动回缩）、透明区域点击透传（`FLAG_NOT_TOUCHABLE` + Android 12+ `maximumObscuringOpacityForTouch` 兼容）与 **职场防社死一键隐身开关**（通知栏快捷操作 + `StealthTileService` 下拉磁贴 + 控制台开关，隐身/息屏/锁屏自动 0 FPS 挂起 GL 线程）
+- [ ] （待真机与官方 SDK 补充）在 Android Studio 放入官方闭源 Live2D Cubism SDK（按 `apps/android/live2d-core/README.md`）并完成真机挂机实测：桌宠贴边不挡屏、点按气泡交互、锁屏/隐身 GPU 归零
 
 ### Day 4：即时流式语音输入（ASR） — 🟣 `[Opus 5.5 Medium]`
 - 目标文件：`apps/android/app/src/main/java/com/neko/secretary/voice/VoicePipeline.kt`
