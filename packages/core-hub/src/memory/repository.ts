@@ -135,6 +135,49 @@ export class MemoryRepository {
     return rows.map((row) => this.mapMemoryRow(row));
   }
 
+  listMemories(limit: number = 50): MemoryRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memories
+         WHERE is_deleted = 0
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+      )
+      .all(limit) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapMemoryRow(row));
+  }
+
+  updateMemory(
+    id: string,
+    patch: { title?: string | null; content?: string; tags?: string[] },
+  ): MemoryRecord | null {
+    const existing = this.db
+      .prepare("SELECT * FROM memories WHERE id = ? AND is_deleted = 0")
+      .get(id) as Record<string, unknown> | undefined;
+    if (!existing) return null;
+    const current = this.mapMemoryRow(existing);
+    const updatedAt = Date.now();
+    const nextTitle = patch.title !== undefined ? patch.title : current.title;
+    const nextContent = patch.content !== undefined ? patch.content.trim() : current.content;
+    const nextTags = patch.tags !== undefined ? patch.tags : current.tags;
+
+    this.db
+      .prepare(
+        `UPDATE memories
+         SET title = ?, content = ?, tags_json = ?, updated_at = ?
+         WHERE id = ? AND is_deleted = 0`,
+      )
+      .run(nextTitle, nextContent, JSON.stringify(nextTags), updatedAt, id);
+
+    return {
+      ...current,
+      title: nextTitle,
+      content: nextContent,
+      tags: nextTags,
+      updatedAt,
+    };
+  }
+
   softDeleteMemory(id: string): boolean {
     const result = this.db
       .prepare("UPDATE memories SET is_deleted = 1, updated_at = ? WHERE id = ? AND is_deleted = 0")
@@ -200,6 +243,13 @@ export class MemoryRepository {
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     }));
+  }
+
+  updateProspectiveStatus(id: string, status: ProspectiveStatus): boolean {
+    const result = this.db
+      .prepare("UPDATE prospective_items SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, Date.now(), id);
+    return Number(result.changes) > 0;
   }
 
   private mapMemoryRow(row: Record<string, unknown>): MemoryRecord {

@@ -25,7 +25,9 @@ import { MemoryRepository } from "./memory/repository.ts";
 import { OrchestratorRegistry } from "./orchestrator/registry.ts";
 import { PersonaRenderer, type PersonaIntent } from "./persona/renderer.ts";
 import { DailyScriptPlugin } from "./plugins/daily-script.ts";
+import { DeadlineRadarPlugin } from "./plugins/deadline-radar.ts";
 import { ShareIntakePlugin, type ShareCardKind } from "./plugins/share-intake.ts";
+import { WorklogInventoryPlugin } from "./plugins/worklog-inventory.ts";
 import { SafetyGate, wrapUntrustedExternalData } from "./policy/safety-gate.ts";
 import { ProactiveEngine } from "./proactive/engine.ts";
 import {
@@ -47,6 +49,8 @@ export interface HubRuntime {
   modelGateway: ModelGateway;
   shareIntake: ShareIntakePlugin;
   dailyScript: DailyScriptPlugin;
+  deadlineRadar: DeadlineRadarPlugin;
+  worklog: WorklogInventoryPlugin;
   pollSchedulerNow(now?: number): DueJobFire[];
   start(): Promise<{ host: string; port: number }>;
   stop(): Promise<void>;
@@ -77,6 +81,8 @@ interface ServerDeps {
   modelGateway: ModelGateway;
   shareIntake: ShareIntakePlugin;
   dailyScript: DailyScriptPlugin;
+  deadlineRadar: DeadlineRadarPlugin;
+  worklog: WorklogInventoryPlugin;
   broadcastNotification: <TParams>(method: string, params: TParams) => void;
 }
 
@@ -113,6 +119,8 @@ export function createHubRuntime(
   }
   const shareIntake = new ShareIntakePlugin(modelGateway, memory);
   const dailyScript = new DailyScriptPlugin(memory, persona, scheduler);
+  const deadlineRadar = new DeadlineRadarPlugin(memory, persona);
+  const worklog = new WorklogInventoryPlugin(memory);
 
   const clients = new Set<WebSocket>();
   const broadcastNotification = <TParams>(method: string, params: TParams): void => {
@@ -140,6 +148,8 @@ export function createHubRuntime(
     modelGateway,
     shareIntake,
     dailyScript,
+    deadlineRadar,
+    worklog,
     broadcastNotification,
   };
 
@@ -150,16 +160,21 @@ export function createHubRuntime(
       "life";
     const stealthOffice = memory.getWorldState<boolean>("stealth_office")?.value ?? false;
     const isCritical = fire.job.action.intent === "deadline_alert";
-    const outcome = proactive.evaluateDecision({
-      urgency: isCritical ? 96 : 65,
-      relevance: 80,
-      value: 75,
-      interruption: stealthOffice ? 50 : 25,
-      fatigue: 15,
-      inQuietHours: false,
-      isDriving: false,
-      stealthOffice,
-    });
+    const recentFeedback = scheduler.listFeedback(50);
+    const outcome = proactive.evaluateDecisionWithFeedback(
+      {
+        urgency: isCritical ? 96 : 65,
+        relevance: 80,
+        value: 75,
+        interruption: stealthOffice ? 50 : 25,
+        fatigue: 15,
+        inQuietHours: false,
+        isDriving: false,
+        stealthOffice,
+      },
+      recentFeedback,
+      fire.job.action.intent,
+    );
     if (!outcome.allow) {
       return;
     }
@@ -255,6 +270,8 @@ export function createHubRuntime(
     modelGateway,
     shareIntake,
     dailyScript,
+    deadlineRadar,
+    worklog,
     pollSchedulerNow: (now: number = Date.now()) => {
       const fires = scheduler.pollDueJobs(now);
       for (const fire of fires) {
@@ -369,6 +386,151 @@ async function handleHttpRequest(
         }),
       );
     }
+    return;
+  }
+
+  const isAuthorized = (): boolean =>
+    !config.hubToken || req.headers.authorization === `Bearer ${config.hubToken}`;
+
+  if (req.method === "GET" && urlPath === "/api/memories") {
+    if (!isAuthorized()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const parsedUrl = new URL(req.url ?? "/api/memories", "http://localhost");
+    const q = parsedUrl.searchParams.get("q")?.trim() ?? "";
+    const limit = Math.min(100, Math.max(1, Number(parsedUrl.searchParams.get("limit") ?? 50) || 50));
+    const items = q ? deps.memory.searchMemories(q, limit) : deps.memory.listMemories(limit);
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, items }));
+    return;
+  }
+
+  if (urlPath.startsWith("/api/memories/")) {
+    if (!isAuthorized()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const memoryId = decodeURIComponent(urlPath.slice("/api/memories/".length));
+    if (req.method === "PATCH") {
+      try {
+        const body = JSON.parse(await readHttpBody(req, 262_144)) as {
+          title?: string | null;
+          content?: string;
+          tags?: string[];
+        };
+        const updated = deps.memory.updateMemory(memoryId, body);
+        if (!updated) {
+          res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "memory_not_found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ ok: true, item: updated }));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "bad_request" }));
+      }
+      return;
+    }
+    if (req.method === "DELETE") {
+      const deleted = deps.memory.softDeleteMemory(memoryId);
+      res.writeHead(deleted ? 200 : 404, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: deleted, deleted }));
+      return;
+    }
+  }
+
+  if (req.method === "GET" && urlPath === "/api/prospective") {
+    if (!isAuthorized()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const items = deps.memory.listProspectiveItems("active");
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, items }));
+    return;
+  }
+
+  if (urlPath.startsWith("/api/prospective/") && req.method === "PATCH") {
+    if (!isAuthorized()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    try {
+      const itemId = decodeURIComponent(urlPath.slice("/api/prospective/".length));
+      const body = JSON.parse(await readHttpBody(req, 65_536)) as {
+        status?: "active" | "done" | "snoozed" | "archived";
+      };
+      if (!body.status) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "status is required" }));
+        return;
+      }
+      const updated = deps.memory.updateProspectiveStatus(itemId, body.status);
+      res.writeHead(updated ? 200 : 404, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: updated }));
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : "bad_request" }));
+    }
+    return;
+  }
+
+  if (req.method === "GET" && urlPath === "/api/deadlines/brief") {
+    if (!isAuthorized()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const alerts = deps.deadlineRadar.scanEscalations();
+    for (const alert of alerts) {
+      deps.broadcastNotification("directive.push", alert.directive);
+    }
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, alerts }));
+    return;
+  }
+
+  if (req.method === "POST" && urlPath === "/api/worklog") {
+    if (!isAuthorized()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    try {
+      const body = JSON.parse(await readHttpBody(req, 131_072)) as {
+        text?: string;
+        tags?: string[];
+      };
+      if (!body.text?.trim()) {
+        res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "text is required" }));
+        return;
+      }
+      const entry = deps.worklog.appendWorklog(body.text, body.tags ?? []);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, entry }));
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : "bad_request" }));
+    }
+    return;
+  }
+
+  if (req.method === "GET" && urlPath === "/api/worklog/weekly") {
+    if (!isAuthorized()) {
+      res.writeHead(401, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+    const report = deps.worklog.generateWeeklyStarReport();
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, ...report }));
     return;
   }
 
@@ -771,6 +933,52 @@ async function handleRpc(
               (envelope.payload as { stealthOffice?: boolean }).stealthOffice,
             );
             deps.memory.upsertWorldState("stealth_office", stealthOffice);
+          } else if (envelope.type === "sensor.notification_external") {
+            const payload = envelope.payload as {
+              packageName?: string;
+              title?: string;
+              text?: string;
+            };
+            const classified = deps.deadlineRadar.ingestExternalNotification({
+              packageName: payload.packageName ?? "unknown",
+              title: payload.title ?? "",
+              text: payload.text ?? "",
+              postedAt: envelope.ts,
+            });
+            if (classified.matched && classified.createdItem) {
+              const mode =
+                deps.memory.getWorldState<AssistantMode>("assistant_mode")?.value ?? "secretary";
+              const stealthOffice =
+                deps.memory.getWorldState<boolean>("stealth_office")?.value ?? false;
+              const directive = deps.persona.render({
+                intent: classified.category === "interview_exam" ? "deadline_alert" : "generic_reply",
+                mode,
+                stealthOffice,
+                ttsAllowed: false,
+                summaryText: `已自动捕获通知并加入待办：${classified.createdItem.title}`,
+              });
+              sendWsNotification(ws, "directive.push", directive);
+            }
+          } else if (envelope.type === "sensor.usage_distraction") {
+            const payload = envelope.payload as {
+              appLabel?: string;
+              minutes?: number;
+            };
+            const stealthOffice =
+              deps.memory.getWorldState<boolean>("stealth_office")?.value ?? false;
+            const mode =
+              deps.memory.getWorldState<AssistantMode>("assistant_mode")?.value ?? "life";
+            const base = deps.persona.render({
+              intent: "generic_reply",
+              mode,
+              stealthOffice,
+              ttsAllowed: false,
+              summaryText: `抓包！专注期内刷 ${payload.appLabel ?? "娱乐 App"} 已满 ${payload.minutes ?? 5} 分钟，快回到正事上来~`,
+            });
+            sendWsNotification(ws, "directive.push", {
+              ...base,
+              state: stealthOffice ? "STEALTH_OFFICE" : "ANTI_PROCRASTINATE",
+            });
           } else if (envelope.type === "user.action_reply") {
             const payload = envelope.payload as {
               actionId?: string;
@@ -818,6 +1026,8 @@ async function handleRpc(
               const targetJobId = jobId ?? lastFire?.jobId ?? "job_water_hourly";
               const snoozedUntil = deps.scheduler.snoozeJob(targetJobId, 5, now);
               deps.memory.upsertWorldState("water_snooze_until", snoozedUntil ?? now + 5 * 60_000);
+            } else if (actionBase === "prospective_done" && embeddedJobId) {
+              deps.memory.updateProspectiveStatus(embeddedJobId, "done");
             } else if (
               actionBase === "script" &&
               (embeddedJobId === "office" ||

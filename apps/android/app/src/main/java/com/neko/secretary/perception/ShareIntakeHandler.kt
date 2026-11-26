@@ -361,9 +361,70 @@ object ShareIntakeHandler {
     }
 }
 
+/**
+ * Pure P3 NotificationListener filter (zero APK reverse engineering).
+ * Only forwards high-signal exam/interview/assessment, delivery, and AI task notifications.
+ */
+object ExternalNotificationFilter {
+    private val INTERVIEW_REGEX = Regex("(?:面试|笔试|测评|机试|考试|腾讯会议|飞书会议|牛客|Offer|interview|exam)", RegexOption.IGNORE_CASE)
+    private val DELIVERY_REGEX = Regex("(?:快递|取件码|菜鸟|丰巢|顺丰|驿站|派送中)", RegexOption.IGNORE_CASE)
+    private val AI_TASK_REGEX = Regex("(?:构建完成|训练完成|build failed|error|completed|approval)", RegexOption.IGNORE_CASE)
+
+    fun classify(packageName: String, title: String, text: String): String? {
+        if (packageName == "com.neko.secretary") return null
+        val combined = "$title $text".trim()
+        if (combined.length < 3) return null
+        return when {
+            INTERVIEW_REGEX.containsMatchIn(combined) -> "interview_exam"
+            DELIVERY_REGEX.containsMatchIn(combined) -> "delivery"
+            AI_TASK_REGEX.containsMatchIn(combined) -> "ai_task"
+            else -> null
+        }
+    }
+
+    fun buildNotificationEventJson(
+        packageName: String,
+        title: String,
+        text: String,
+        category: String,
+        postedAt: Long,
+        eventId: String = UUID.randomUUID().toString()
+    ): String {
+        val key = ShareIntakeCodec.computeIdempotencyKey("$packageName|$title|$text", null)
+            .replace("android:share:", "android:notif:")
+        return JSONObject()
+            .put("id", eventId)
+            .put("idempotencyKey", key)
+            .put("type", "sensor.notification_external")
+            .put("source", "android")
+            .put("ts", postedAt)
+            .put(
+                "payload",
+                JSONObject()
+                    .put("packageName", packageName)
+                    .put("title", title)
+                    .put("text", text)
+                    .put("category", category)
+            )
+            .toString()
+    }
+}
+
 class ExternalNotificationListener : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        // Week 2: Forward user-authorized AI task completions & exam/interview deadline alerts
-        // to Core Hub via EventEnvelope ("sensor.notification_external").
+        if (sbn == null) return
+        val pkg = sbn.packageName ?: return
+        val extras = sbn.notification?.extras ?: return
+        val title = extras.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val text = extras.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString().orEmpty()
+        val category = ExternalNotificationFilter.classify(pkg, title, text) ?: return
+        val eventJson = ExternalNotificationFilter.buildNotificationEventJson(
+            packageName = pkg,
+            title = title,
+            text = text,
+            category = category,
+            postedAt = sbn.postTime
+        )
+        com.neko.secretary.sync.EventSyncCoordinator.sendEventAsync(applicationContext, eventJson)
     }
 }

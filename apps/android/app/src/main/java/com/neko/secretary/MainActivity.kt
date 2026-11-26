@@ -47,6 +47,7 @@ import com.neko.secretary.overlay.CompanionOverlayService
 import com.neko.secretary.overlay.DailyScriptTracker
 import com.neko.secretary.overlay.OverlayRuntime
 import com.neko.secretary.overlay.StealthController
+import com.neko.secretary.perception.FocusUsageMonitor
 import com.neko.secretary.perception.HubEndpointConfig
 import com.neko.secretary.perception.HubEndpointStore
 import com.neko.secretary.perception.ShareIntakeHandler
@@ -58,6 +59,7 @@ import com.neko.secretary.protocol.DirectiveAction
 import com.neko.secretary.protocol.TodayScript
 import com.neko.secretary.sync.EventSyncCoordinator
 import com.neko.secretary.sync.OfflineReminderScheduler
+import com.neko.secretary.ui.MemoryBrowserSection
 import com.neko.secretary.voice.AsrConfig
 import com.neko.secretary.voice.AsrConfigStore
 import com.neko.secretary.voice.AsrProviderKind
@@ -100,6 +102,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     NekoHomeConsole(
+                        context = this,
                         initialAsrConfig = initialAsrConfig,
                         initialHubConfig = initialHubConfig,
                         initialWorkWifiCsv = initialWorkWifiCsv,
@@ -107,6 +110,9 @@ class MainActivity : ComponentActivity() {
                         onStopOverlay = { stopService(CompanionOverlayService.intent(this)) },
                         onToggleStealth = { StealthController.set(this, it) },
                         onToggleTts = { DailyScriptTracker.setTtsUserEnabled(this, it) },
+                        onToggleFocus = { FocusUsageMonitor.setFocusMode(this, it) },
+                        onOpenUsageAccess = { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
+                        onOpenNotificationAccess = { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
                         onSelectScript = { DailyScriptTracker.applyScript(this, it) },
                         onSaveWorkWifiCsv = { csv ->
                             WifiStealthConfigStore.saveRawCsv(this, csv)
@@ -200,6 +206,7 @@ private fun demoDirective(
 
 @Composable
 fun NekoHomeConsole(
+    context: android.content.Context,
     initialAsrConfig: AsrConfig,
     initialHubConfig: HubEndpointConfig,
     initialWorkWifiCsv: String,
@@ -207,6 +214,9 @@ fun NekoHomeConsole(
     onStopOverlay: () -> Unit,
     onToggleStealth: (Boolean) -> Unit,
     onToggleTts: (Boolean) -> Unit,
+    onToggleFocus: (Boolean) -> Unit,
+    onOpenUsageAccess: () -> Unit,
+    onOpenNotificationAccess: () -> Unit,
     onSelectScript: (TodayScript) -> Unit,
     onSaveWorkWifiCsv: (String) -> Unit,
     onImportModel: () -> Unit,
@@ -221,6 +231,8 @@ fun NekoHomeConsole(
     val stealthOffice by CharacterStateMachine.stealthOffice.collectAsState()
     val todayScript by DailyScriptTracker.todayScript.collectAsState()
     val ttsEnabled by DailyScriptTracker.ttsUserEnabled.collectAsState()
+    val focusActive by FocusUsageMonitor.focusActive.collectAsState()
+    var activeTab by remember { mutableStateOf(0) }
     val running by OverlayRuntime.running.collectAsState()
     val targetFps by OverlayRuntime.targetFps.collectAsState()
     val measuredFps by OverlayRuntime.measuredFps.collectAsState()
@@ -251,6 +263,19 @@ fun NekoHomeConsole(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("Neko-Secretary Console", style = MaterialTheme.typography.headlineSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (activeTab == 0) {
+                Button(onClick = { activeTab = 0 }) { Text("控制台") }
+                OutlinedButton(onClick = { activeTab = 1 }) { Text("六维记忆 & 死线") }
+            } else {
+                OutlinedButton(onClick = { activeTab = 0 }) { Text("控制台") }
+                Button(onClick = { activeTab = 1 }) { Text("六维记忆 & 死线") }
+            }
+        }
+        if (activeTab == 1) {
+            MemoryBrowserSection(context = context)
+            return
+        }
         Text("Mode: ${mode.wireName} | State: $state")
         Text(
             "Overlay: ${if (running) "running" else "stopped"} | backend=$backend | " +
@@ -314,6 +339,16 @@ fun NekoHomeConsole(
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("职场防社死一键隐身 (0 FPS)")
             Switch(checked = stealthOffice, onCheckedChange = onToggleStealth)
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("专注防摸鱼监工 (5m 抓包)")
+            Switch(checked = focusActive, onCheckedChange = onToggleFocus)
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onOpenUsageAccess) { Text("Usage权限") }
+            OutlinedButton(onClick = onOpenNotificationAccess) { Text("通知监听权限") }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {

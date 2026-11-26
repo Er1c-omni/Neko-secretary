@@ -66,18 +66,18 @@
 - [x] 验收：核心策略与闭环通过 `pnpm typecheck && pnpm test`（18/18）及 Android `:app:testDebugUnitTest`（44/44）与 `:app:assembleDebug`；同步修复了 `Pixel_7` 实测发现的明文私网 HTTP/WS 限制（`usesCleartextTraffic`）、中文输入法全角 URL 标点与浅色状态栏图标问题
 
 ### Day 10–11：死线雷达 + 考前速览 + 碎片/周报管理 — 🟢 `[Hydrogen High]`
-- 目标文件：`apps/android/app/src/main/java/com/neko/secretary/perception/ShareIntakeHandler.kt`、`packages/core-hub/src/plugins/`
-- [ ] 接入 Android `NotificationListenerService` 捕获笔试/面试/测评/快递通知（严守零逆向原则）
-- [ ] 实现 `prospective_items` 24h/2h/30m 梯度死线升级提醒，及考前/会前 30 分钟秘书速览卡（不做八股抽查）
-- [ ] 实现下班 30 秒语音攒实习流水账插件（周五汇总周报与 STAR 简历素材）及消费续费/物品保质期记录
-- [ ] 验收：面试通知截图/短信自动生成梯度提醒与考前速览；语音碎碎念可按标签归档
+- 目标文件：`apps/android/app/src/main/java/com/neko/secretary/perception/ShareIntakeHandler.kt`、`packages/core-hub/src/plugins/deadline-radar.ts`、`packages/core-hub/src/plugins/worklog-inventory.ts`
+- [x] 接入 Android `NotificationListenerService`（`ExternalNotificationListener` + `ExternalNotificationFilter`）捕获笔试/面试/测评/快递/AI 任务通知并上报 `sensor.notification_external`（严守零逆向原则）
+- [x] 实现 `DeadlineRadarPlugin` 针对 `prospective_items` 的 24h/2h/30m 梯度死线升级提醒（含去重键防连弹）及考前/会前 30 分钟秘书轻速览卡（`GET /api/deadlines/brief`，严格不做八股抽查）
+- [x] 实现下班 30 秒语音攒实习流水账插件 `WorklogInventoryPlugin`（`POST /api/worklog`、`GET /api/worklog/weekly` 汇总周报与 STAR 简历素材初稿）及消费续费/物品保质期记录
+- [x] 验收：`day10-14-week2.test.ts` 与 `Week2PerceptionTest` 覆盖通知分类防注入包裹、24h/2h/30m 梯度升级与周报 STAR 汇总
 
 ### Day 12–14：专注防摸鱼监工 + 六维记忆可视化 + 主动策略自学习 — 🟢 `[Hydrogen High]`（评分调权按需切 🟣）
-- 目标文件：`apps/android/` UI 与感知层、`packages/core-hub/src/memory/repository.ts`、`packages/core-hub/src/proactive/engine.ts`
-- [ ] 接入 `UsageStatsManager` 检测专注期内刷短视频/娱乐 App 超阈值，触发 `ANTI_PROCRASTINATE` 桌宠中心抓包动画
-- [ ] 在 Android Compose UI 实现记忆（`memories`）与前瞻事项（`prospective_items`）的 FTS5 搜索、查看、编辑与软删除界面
-- [ ] 落地 `ProactiveEngine` 基于 `proactive_feedback` 历史点击率微调打扰阈值（复杂边界调参可按需切 `Opus 5.5 Medium`）
-- [ ] 验收：论文模式刷 B 站 5 分钟桌宠跳出劝回；App 内可随时检索并删除历史记忆
+- 目标文件：`apps/android/app/src/main/java/com/neko/secretary/perception/FocusMonitor.kt`、`apps/android/app/src/main/java/com/neko/secretary/ui/MemoryBrowserScreen.kt`、`packages/core-hub/src/memory/repository.ts`、`packages/core-hub/src/proactive/engine.ts`
+- [x] 接入 `UsageStatsManager`（`FocusUsageMonitor` + `DistractionDetector`）检测专注期内刷 B 站/抖音/小红书/微博/YouTube 等娱乐 App 超 5 分钟阈值，触发 `ANTI_PROCRASTINATE` 抓包指令并上报 `sensor.usage_distraction`
+- [x] 在 Android Compose UI 实现 `MemoryBrowserSection`（支持 `GET /api/memories?q=...` FTS5 检索、`PATCH /api/memories/:id` 内联编辑、`DELETE /api/memories/:id` 软删除及 `prospective_items` 完成标记）
+- [x] 落地 `ProactiveEngine.computeAdaptiveThreshold` / `evaluateDecisionWithFeedback`，基于 `proactive_feedback` 历史点击率在 `[15, 45]` 区间平滑微调打扰阈值（L0 关键告警始终穿透）
+- [x] 验收：`pnpm typecheck && pnpm test`（22/22）与 Android `:app:testDebugUnitTest`（46/46）及 `:app:assembleDebug` 全部通过，并在 `Pixel_7` 模拟器完成新版 UI 安装验收
 
 ---
 
