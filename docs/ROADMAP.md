@@ -34,7 +34,9 @@
 ### Day 4：即时流式语音输入（ASR） — 🟣 `[Opus 5.5 Medium]`
 - 目标文件：`apps/android/app/src/main/java/com/neko/secretary/voice/VoicePipeline.kt`
 - 切换原因：涉及端侧 AudioRecord 实时采集分帧、流式 WebSocket 双向通信、长按松手/上滑取消状态机及 Sherpa-ONNX 离线兜底切换。
-- [ ] 在 `VoicePipeline` 接入火山引擎流式 ASR（或 FunASR），实现长按桌宠说话、松手发送、上滑取消（附 Sherpa-ONNX 离线兜底接口）
+- [x] 在 `VoicePipeline` 实现 16kHz PCM 分帧采集（`AudioFrameCapture` + RMS 音量包络）、火山引擎二进制流式协议（`VolcengineProtocol` / `VolcengineWsAsrBackend`）与阿里 FunASR 2-pass WebSocket 协议（`FunAsrProtocol` / `FunAsrWsAsrBackend`）、断网/未配置自动降级 Sherpa-ONNX 离线兜底接口（`SherpaOnnxOfflineAsrEngine`）、口头禅清洗（`TranscriptCleaner`）与 `user.voice_transcript` 标准信封封装（`VoiceEventFactory`）
+- [x] 在 `CompanionOverlayService` 与 `MainActivity` 接入长按桌宠说话、松手发送、上滑取消（含迟滞防抖 `VoiceGestureMachine` + 实时转写气泡 + 60 FPS 提频）与控制台 ASR 配置页；已通过 `:app:testDebugUnitTest`（35/35）与 `:app:assembleDebug`
+- [ ] （待真机/API Key 补充）配置真实火山引擎或 FunASR 密钥，在真机/模拟器验证麦克风实时流式识别与 Core Hub 联动
 
 ### Day 5：截图分享一键吞噬 — 🟢 `[Hydrogen High]`
 - 目标文件：`apps/android/app/src/main/java/com/neko/secretary/perception/ShareIntakeHandler.kt`、`packages/core-hub/src/plugins/`

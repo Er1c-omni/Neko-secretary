@@ -14,12 +14,15 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -41,6 +44,9 @@ import com.neko.secretary.perception.ShareIntakeHandler
 import com.neko.secretary.protocol.AssistantMode
 import com.neko.secretary.protocol.CharacterDirective
 import com.neko.secretary.protocol.CharacterStateId
+import com.neko.secretary.voice.AsrConfig
+import com.neko.secretary.voice.AsrConfigStore
+import com.neko.secretary.voice.AsrProviderKind
 import java.util.UUID
 import kotlin.concurrent.thread
 
@@ -48,6 +54,15 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best effort */ }
+
+    private val audioPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            Toast.makeText(
+                this,
+                if (granted) "麦克风权限已开启，可长按桌宠说话" else "未授予麦克风权限，无法语音输入",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
 
     private val modelPicker =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -62,14 +77,21 @@ class MainActivity : ComponentActivity() {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        val initialAsrConfig = AsrConfigStore.load(this)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     NekoHomeConsole(
+                        initialAsrConfig = initialAsrConfig,
                         onStartOverlay = ::startOverlay,
                         onStopOverlay = { stopService(CompanionOverlayService.intent(this)) },
                         onToggleStealth = { StealthController.set(this, it) },
-                        onImportModel = { modelPicker.launch(arrayOf("application/zip", "application/octet-stream")) }
+                        onImportModel = { modelPicker.launch(arrayOf("application/zip", "application/octet-stream")) },
+                        onRequestAudioPermission = { audioPermission.launch(Manifest.permission.RECORD_AUDIO) },
+                        onSaveAsrConfig = { cfg ->
+                            AsrConfigStore.save(this, cfg)
+                            Toast.makeText(this, "已保存 ASR 配置 (${cfg.provider.wireName})", Toast.LENGTH_SHORT).show()
+                        }
                     )
                 }
             }
@@ -131,10 +153,13 @@ private fun demoDirective(state: CharacterStateId, text: String, mode: Assistant
 
 @Composable
 fun NekoHomeConsole(
+    initialAsrConfig: AsrConfig,
     onStartOverlay: () -> Unit,
     onStopOverlay: () -> Unit,
     onToggleStealth: (Boolean) -> Unit,
-    onImportModel: () -> Unit
+    onImportModel: () -> Unit,
+    onRequestAudioPermission: () -> Unit,
+    onSaveAsrConfig: (AsrConfig) -> Unit
 ) {
     val state by CharacterStateMachine.currentState.collectAsState()
     val mode by CharacterStateMachine.mode.collectAsState()
@@ -145,7 +170,15 @@ fun NekoHomeConsole(
     val backend by OverlayRuntime.backend.collectAsState()
     val docked by OverlayRuntime.docked.collectAsState()
     val passThrough by OverlayRuntime.passThrough.collectAsState()
+    val voiceActive by OverlayRuntime.voiceActive.collectAsState()
+    val voiceProvider by OverlayRuntime.voiceProvider.collectAsState()
+    val lastTranscript by OverlayRuntime.lastTranscript.collectAsState()
     var ttsEnabled by remember { mutableStateOf(false) }
+
+    var asrProvider by remember { mutableStateOf(initialAsrConfig.provider) }
+    var asrWsUrl by remember { mutableStateOf(initialAsrConfig.wsUrl) }
+    var asrAppId by remember { mutableStateOf(initialAsrConfig.appId) }
+    var asrToken by remember { mutableStateOf(initialAsrConfig.accessToken) }
 
     Column(
         modifier = Modifier
@@ -161,6 +194,11 @@ fun NekoHomeConsole(
                 "${if (docked) "peek" else "expanded"}${if (passThrough) " | passthrough" else ""}",
             style = MaterialTheme.typography.bodySmall
         )
+        Text(
+            "Voice ASR: ${if (voiceActive) "recording" else "idle"} ($voiceProvider)" +
+                if (lastTranscript.isNotBlank()) " | last: $lastTranscript" else "",
+            style = MaterialTheme.typography.bodySmall
+        )
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onStartOverlay) { Text("Start Overlay") }
@@ -168,11 +206,14 @@ fun NekoHomeConsole(
             OutlinedButton(onClick = onImportModel) { Text("Import .zip") }
         }
 
-        Button(onClick = {
-            val next = if (mode == AssistantMode.LIFE) AssistantMode.SECRETARY else AssistantMode.LIFE
-            CharacterStateMachine.onModeChanged(next)
-        }) {
-            Text(if (mode == AssistantMode.LIFE) "Switch to Secretary" else "Switch to Life Maid")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                val next = if (mode == AssistantMode.LIFE) AssistantMode.SECRETARY else AssistantMode.LIFE
+                CharacterStateMachine.onModeChanged(next)
+            }) {
+                Text(if (mode == AssistantMode.LIFE) "Switch to Secretary" else "Switch to Life Maid")
+            }
+            OutlinedButton(onClick = onRequestAudioPermission) { Text("Mic Permission") }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -202,6 +243,52 @@ fun NekoHomeConsole(
                     demoDirective(CharacterStateId.SLEEPY_NIGHT, "已经很晚了，早点休息吧~", mode)
                 )
             }) { Text("Sleepy") }
+        }
+
+        HorizontalDivider()
+        Text("Streaming ASR Config (长按桌宠说话)", style = MaterialTheme.typography.titleSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AsrProviderKind.entries.forEach { kind ->
+                if (asrProvider == kind) {
+                    Button(onClick = { asrProvider = kind }) { Text(kind.wireName) }
+                } else {
+                    OutlinedButton(onClick = { asrProvider = kind }) { Text(kind.wireName) }
+                }
+            }
+        }
+        OutlinedTextField(
+            value = asrWsUrl,
+            onValueChange = { asrWsUrl = it },
+            label = { Text("WebSocket URL (wss://...)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = asrAppId,
+            onValueChange = { asrAppId = it },
+            label = { Text("App ID / Key (optional)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = asrToken,
+            onValueChange = { asrToken = it },
+            label = { Text("Access Token (optional)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Button(onClick = {
+            onSaveAsrConfig(
+                AsrConfig(
+                    provider = asrProvider,
+                    wsUrl = asrWsUrl,
+                    appId = asrAppId,
+                    accessToken = asrToken,
+                    offlineFallbackEnabled = true
+                )
+            )
+        }) {
+            Text("Save ASR Config")
         }
     }
 }

@@ -24,7 +24,7 @@
 - `live2d/FramePacingPolicy.kt` / `HitTestMask.kt` / `Live2DModelRepository.kt`: 60/20/10/0 四级帧率策略、Alpha 命中网格与安全 `.zip` 模型导入
 - `live2d/Live2DModelBackend.kt` / `PlaceholderNekoBackend.kt` / `cubism/CubismModelBackend.kt`: 渲染后端解耦接口、占位渲染器与条件编译的真实 Cubism 后端
 - `live2d/CharacterStateMachine.kt`: 10 态角色状态机（隐身正交锁）
-- `voice/VoicePipeline.kt`: 长按流式 ASR + Sherpa-ONNX 离线兜底 + 可选缓存 TTS
+- `voice/VoicePipeline.kt` / `VolcengineProtocol.kt` / `FunAsrProtocol.kt` / `AudioFrameCapture.kt` / `VoiceGestureMachine.kt` / `SherpaOnnxFallback.kt`: 长按说话/松手发送/上滑取消状态机、16kHz PCM 分帧 + RMS 包络、火山引擎/FunASR 双协议流式 ASR、Sherpa-ONNX 离线兜底与口头禅清洗
 - `perception/ShareIntakeHandler.kt`: `ACTION_SEND` 截图与链接一键接收
 - `sync/TransportClient.kt`: `TransportAdapter`（Tailscale 直连默认，预留 Cloud Relay）
 - `actions/SafetyGateClient.kt`: L2 级远端审批弹窗状态模型

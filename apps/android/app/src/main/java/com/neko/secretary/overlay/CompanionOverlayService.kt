@@ -1,5 +1,6 @@
 package com.neko.secretary.overlay
 
+import android.Manifest
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
@@ -14,6 +15,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Color
@@ -40,6 +42,7 @@ import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.neko.secretary.MainActivity
 import com.neko.secretary.live2d.CharacterLook
 import com.neko.secretary.live2d.CharacterStateMachine
@@ -50,6 +53,12 @@ import com.neko.secretary.live2d.RenderConditions
 import com.neko.secretary.protocol.AssistantMode
 import com.neko.secretary.protocol.CharacterDirective
 import com.neko.secretary.protocol.CharacterStateId
+import com.neko.secretary.voice.StreamingVoicePipeline
+import com.neko.secretary.voice.VoiceEventFactory
+import com.neko.secretary.voice.VoiceGestureMachine
+import com.neko.secretary.voice.VoiceGestureOutcome
+import com.neko.secretary.voice.VoiceGesturePhase
+import com.neko.secretary.voice.VoiceSessionState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -80,6 +89,8 @@ class CompanionOverlayService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var renderer: Live2DTextureRenderer
     private lateinit var bubble: BubbleWindow
+    private lateinit var voicePipeline: StreamingVoicePipeline
+    private lateinit var voiceGesture: VoiceGestureMachine
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -163,6 +174,8 @@ class CompanionOverlayService : Service() {
         StealthController.restore(this)
         renderer = Live2DTextureRenderer(this) { Live2DModelRepository.resolveActiveModel(this) }
         bubble = BubbleWindow(this, windowManager) { onBubbleDismissed() }
+        voicePipeline = StreamingVoicePipeline.create(this)
+        voiceGesture = VoiceGestureMachine(cancelThresholdPx = dp(VOICE_CANCEL_DRAG_DP).toFloat())
         side = OverlayPrefs.side(this)
         screenInteractive = getSystemService(PowerManager::class.java).isInteractive && !isKeyguardLocked()
 
@@ -206,7 +219,10 @@ class CompanionOverlayService : Service() {
         if (::bubble.isInitialized) bubble.hide()
         root?.let { view -> runCatching { windowManager.removeView(view) } }
         root = null
+        if (::voicePipeline.isInitialized) voicePipeline.release()
         if (::renderer.isInitialized) renderer.release()
+        OverlayRuntime._voiceActive.value = false
+        OverlayRuntime._voiceCancelArmed.value = false
         velocityTracker?.recycle()
         velocityTracker = null
         super.onDestroy()
@@ -352,6 +368,15 @@ class CompanionOverlayService : Service() {
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                if (::voiceGesture.isInitialized && voiceGesture.isActive) {
+                    val changed = voiceGesture.onMove(event.rawY)
+                    if (changed) {
+                        val armed = voiceGesture.phase == VoiceGesturePhase.CANCEL_ARMED
+                        OverlayRuntime._voiceCancelArmed.value = armed
+                        renderVoiceBubble(voicePipeline.sessionState.value)
+                    }
+                    return true
+                }
                 velocityTracker?.let { trackRaw(it, event) }
                 val dx = event.rawX - downRawX
                 val dy = event.rawY - downRawY
@@ -384,6 +409,9 @@ class CompanionOverlayService : Service() {
                 }
                 velocityTracker = null
                 when {
+                    ::voiceGesture.isInitialized && voiceGesture.isActive -> {
+                        finishVoiceGesture(aborted = event.actionMasked == MotionEvent.ACTION_CANCEL)
+                    }
                     dragging -> dockAfterDrag(vx)
                     event.actionMasked == MotionEvent.ACTION_UP && !longPressed -> onTap(event.x, event.y)
                 }
@@ -429,10 +457,80 @@ class CompanionOverlayService : Service() {
     private fun onLongPress() {
         longPressed = true
         boost(TAP_BOOST_MS)
-        // Week 1 Day 4 hook: VoicePipeline long-press streaming ASR starts here.
         if (docked) expandFromEdge()
-        showBubble("（长按说话：流式 ASR 将在 Day 4 接入）")
-        scheduleAutoRetract()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            showBubble("请先在控制台授予麦克风权限后再长按说话")
+            scheduleAutoRetract()
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (!voiceGesture.start(downRawY, now)) return
+        OverlayRuntime._voiceActive.value = true
+        OverlayRuntime._voiceCancelArmed.value = false
+        showBubble("正在聆听…（松手发送 · 上滑取消）")
+        refreshFps()
+        scope.launch { voicePipeline.startStreaming() }
+    }
+
+    private fun finishVoiceGesture(aborted: Boolean) {
+        val now = SystemClock.uptimeMillis()
+        val durationMs = voiceGesture.elapsedMs(now)
+        val outcome = if (aborted) voiceGesture.abort() else voiceGesture.release(now)
+        OverlayRuntime._voiceActive.value = false
+        OverlayRuntime._voiceCancelArmed.value = false
+        refreshFps()
+
+        when (outcome) {
+            VoiceGestureOutcome.CANCELLED -> {
+                voicePipeline.cancel()
+                showBubble("已取消录音")
+                scheduleAutoRetract()
+            }
+            VoiceGestureOutcome.TOO_SHORT -> {
+                voicePipeline.cancel()
+                showBubble("说话时间太短，请长按后再松手")
+                scheduleAutoRetract()
+            }
+            VoiceGestureOutcome.SEND -> {
+                showBubble("识别中…")
+                scope.launch {
+                    val provider = voicePipeline.sessionState.value.activeProvider
+                    val raw = voicePipeline.sessionState.value.partialText
+                    val cleaned = voicePipeline.finishStreaming()
+                    voiceGesture.markFinished()
+                    if (cleaned.isNotBlank()) {
+                        OverlayRuntime._lastTranscript.value = cleaned
+                        showBubble("「$cleaned」")
+                        val eventJson = VoiceEventFactory.buildTranscriptEventJson(
+                            cleanedText = cleaned,
+                            rawText = raw.ifBlank { cleaned },
+                            provider = provider,
+                            durationMs = durationMs
+                        )
+                        OverlayRuntime.onVoiceTranscriptEvent?.invoke(eventJson)
+                    } else {
+                        val err = voicePipeline.sessionState.value.errorMessage
+                        showBubble(err ?: "没有听清，请重试")
+                    }
+                    scheduleAutoRetract()
+                }
+            }
+            VoiceGestureOutcome.NONE -> Unit
+        }
+    }
+
+    private fun renderVoiceBubble(session: VoiceSessionState) {
+        if (!::voiceGesture.isInitialized || !voiceGesture.isActive) return
+        val text = if (voiceGesture.phase == VoiceGesturePhase.CANCEL_ARMED) {
+            "松开手指取消发送"
+        } else if (session.partialText.isNotBlank()) {
+            "聆听中：${session.partialText}"
+        } else {
+            "正在聆听…（松手发送 · 上滑取消）"
+        }
+        showBubble(text, minimal = stealthLayout)
     }
 
     private fun setInteracting(value: Boolean) {
@@ -551,6 +649,15 @@ class CompanionOverlayService : Service() {
         scope.launch { renderer.motionActive.collect { refreshFps() } }
         scope.launch { renderer.measuredFps.collect { OverlayRuntime._measuredFps.value = it } }
         scope.launch { renderer.backendName.collect { OverlayRuntime._backend.value = it } }
+        scope.launch {
+            voicePipeline.sessionState.collect { session ->
+                OverlayRuntime._voiceProvider.value = session.activeProvider
+                if (voiceGesture.isActive) {
+                    renderVoiceBubble(session)
+                    refreshFps()
+                }
+            }
+        }
     }
 
     private fun onStateChanged(state: CharacterStateId, mode: AssistantMode) {
@@ -616,7 +723,8 @@ class CompanionOverlayService : Service() {
             state = CharacterStateMachine.currentState.value,
             screenInteractive = screenInteractive,
             overlayVisible = root?.isAttachedToWindow != false && !stealthLayout,
-            interacting = interacting || snapAnimator != null,
+            interacting = interacting || snapAnimator != null ||
+                (::voiceGesture.isInitialized && voiceGesture.isActive),
             motionActive = now < boostUntil || renderer.motionActive.value,
             docked = docked
         )
@@ -722,6 +830,7 @@ class CompanionOverlayService : Service() {
         private const val AUTO_RETRACT_MS = 8_000L
         private const val STEALTH_BUBBLE_MS = 3_000L
         private const val PASS_THROUGH_GRACE_MS = 1_500L
+        private const val VOICE_CANCEL_DRAG_DP = 64
         private const val DEFAULT_MAX_OBSCURING = 0.8f
 
         fun intent(context: Context, action: String? = null): Intent =

@@ -28,6 +28,22 @@ object OverlayRuntime {
 
     internal val _passThrough = MutableStateFlow(false)
     val passThrough: StateFlow<Boolean> = _passThrough.asStateFlow()
+
+    internal val _voiceActive = MutableStateFlow(false)
+    val voiceActive: StateFlow<Boolean> = _voiceActive.asStateFlow()
+
+    internal val _voiceCancelArmed = MutableStateFlow(false)
+    val voiceCancelArmed: StateFlow<Boolean> = _voiceCancelArmed.asStateFlow()
+
+    internal val _voiceProvider = MutableStateFlow("idle")
+    val voiceProvider: StateFlow<String> = _voiceProvider.asStateFlow()
+
+    internal val _lastTranscript = MutableStateFlow("")
+    val lastTranscript: StateFlow<String> = _lastTranscript.asStateFlow()
+
+    /** Optional sink invoked with standard `user.voice_transcript` EventEnvelope JSON. */
+    @Volatile
+    var onVoiceTranscriptEvent: ((String) -> Unit)? = null
 }
 
 /** Non-secret UI placement prefs (no SSIDs / keys here, per ENGINEERING_SPEC §1.3). */
